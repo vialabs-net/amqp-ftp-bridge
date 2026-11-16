@@ -34,9 +34,68 @@ Error diagnostics are limited to 2 KiB each and to the available AMQP header fra
 
 Dead-letter messages have no active expiration; the original TTL is recorded in `x-original-expiration` when frame space permits. FTP uploads use a temporary remote file and rename it to the destination only after a successful transfer. A failed transfer preserves the existing destination. Per-route journals under the locked temporary directory record remote staging names before STOR. Failed transfers clean up through a fresh FTP connection; the next upload recovers recorded staging files after a disconnect or process restart.
 
-If the process stops during a message, RabbitMQ redelivers it and the upload overwrites the file. On Windows, temporary contents inherit a protected SYSTEM/Administrators-only directory ACL. At startup, the service locks its temporary directory and removes abandoned download and field files. A second instance sharing that directory fails to start until the first releases it.
+If the process stops during a message, RabbitMQ redelivers it and the upload overwrites the file. On Windows, temporary contents inherit a protected directory ACL: SYSTEM, Administrators and the service SID only. At startup, the service locks its temporary directory and removes abandoned download and field files. A second instance sharing that directory fails to start until the first releases it.
 
 The service reconnects to RabbitMQ with exponential backoff (1 s up to `reconnect_max`, default 60 s). On stop it cancels the consumers, waits for the in-flight messages (up to `shutdown_timeout`) and exits.
+
+## Install
+
+Download `amqp-ftp-bridge.msi` from the [releases](https://github.com/vialabs-net/amqp-ftp-bridge/releases). Run it as an administrator.
+
+| Path | Content |
+|---|---|
+| `C:\Program Files\amqp-ftp-bridge\` | `amqp-ftp-bridge.exe`, `config.example.yaml` |
+| `%ProgramData%\amqp-ftp-bridge\` | `config.yaml`, `logs\`, `credentials\`, `tmp\` |
+
+The data directories do not inherit permissions. SYSTEM and Administrators have full control. The service SID `NT SERVICE\amqp-ftp-bridge` can read the configuration and credentials and write to `logs` and `tmp`. Nobody else has access.
+
+The service `amqp-ftp-bridge` ("AMQP FTP Bridge") starts automatically and restarts 10 s after a failure. The install starts it only when `config.yaml` exists or `CONFIG_FILE` is given.
+
+**MSI properties**
+
+| Property | Default | Purpose |
+|---|---|---|
+| `SERVICE_ACCOUNT` | `NT SERVICE\amqp-ftp-bridge` | Service account: the virtual account, a gMSA (`DOMAIN\name$`) or a user (`DOMAIN\user`) |
+| `SERVICE_PASSWORD` | empty | Password of a user account. Not stored. |
+| `CONFIG_FILE` | none | Full path of a configuration copied to `%ProgramData%\amqp-ftp-bridge\config.yaml`, replacing the existing one |
+| `METRICS_ALLOW_FROM` | none | Adds an inbound firewall rule for TCP `METRICS_PORT` from this address only (`192.0.2.10`, or a list: `192.0.2.10,192.0.2.0/24`). No rule when empty. |
+| `METRICS_PORT` | `9464` | Port of the firewall rule. Must match `metrics.listen`. |
+
+`SERVICE_ACCOUNT`, `METRICS_ALLOW_FROM` and `METRICS_PORT` are stored in `HKLM\SOFTWARE\vialabs\amqp-ftp-bridge`. An upgrade that does not pass them uses the stored values.
+
+**Silent install**
+
+```
+msiexec /i amqp-ftp-bridge.msi /qn /l*v install.log CONFIG_FILE=C:\setup\config.yaml METRICS_ALLOW_FROM=192.0.2.10
+"C:\Program Files\amqp-ftp-bridge\amqp-ftp-bridge.exe" creds set rabbitmq
+"C:\Program Files\amqp-ftp-bridge\amqp-ftp-bridge.exe" service start
+```
+
+Store every credential the configuration names, then start the service. Until then the service stops at startup and restarts every 10 s.
+
+**Upgrade**
+
+Install the new MSI the same way. The upgrade replaces the program and keeps the configuration, credentials and logs. With a user account, pass `SERVICE_PASSWORD` again.
+
+**Uninstall**
+
+```
+msiexec /x amqp-ftp-bridge.msi /qn
+```
+
+Or remove "amqp-ftp-bridge" in Settings, Apps. Uninstall removes the program, the service, the Event Log source and the firewall rule. `%ProgramData%\amqp-ftp-bridge` stays: delete it to remove the configuration, credentials and logs.
+
+Remove a service installed with `amqp-ftp-bridge service install` (`service uninstall`) before installing the MSI.
+
+**Verify a download**
+
+```
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify amqp-ftp-bridge.msi --repo vialabs-net/amqp-ftp-bridge
+gh attestation verify amqp-ftp-bridge.exe --repo vialabs-net/amqp-ftp-bridge
+```
+
+In PowerShell, compare `Get-FileHash amqp-ftp-bridge.msi` with the line in `SHA256SUMS`. `gh attestation verify` checks that the file was built by this repository's release workflow from the tagged commit. Each release also has an SPDX SBOM, `amqp-ftp-bridge.spdx.json`.
 
 ## Configuration
 
@@ -192,6 +251,52 @@ go test -tags integration ./...   # needs Docker
 ```
 
 The integration tests start RabbitMQ and an FTP server with testcontainers.
+
+**Windows executable and MSI**
+
+```
+scripts/build-windows.sh 1.2.3 "$(git rev-parse --short=12 HEAD)" dist/amqp-ftp-bridge.exe
+dotnet tool install --global wix --version 5.0.2
+wix extension add --global WixToolset.Firewall.wixext/5.0.2
+installer/build.ps1 -Version 1.2.3 -Exe dist/amqp-ftp-bridge.exe -Out dist/amqp-ftp-bridge.msi
+```
+
+`build-windows.sh` adds the version resource (go-winres, `cmd/amqp-ftp-bridge/winres.json`). The MSI builds on Windows. `installer/smoke-test.ps1` installs, upgrades, starts and uninstalls on a disposable machine; CI runs it on every pull request.
+
+## Release
+
+Push a tag `v1.2.3`, or `v1.2.3-rc.1` for a pre-release. The workflow `release.yml` publishes a GitHub release with:
+
+| File | Content |
+|---|---|
+| `amqp-ftp-bridge.exe` | Executable |
+| `amqp-ftp-bridge.msi` | Installer |
+| `amqp-ftp-bridge.spdx.json` | SPDX SBOM of the modules in the executable |
+| `SHA256SUMS` | SHA-256 of the files above |
+
+The exe, the MSI and the SBOM have build provenance attestations.
+
+## Code signing
+
+Releases are unsigned until signing is configured. The workflow signs the exe, builds the MSI with it, then signs the MSI.
+
+**Azure Artifact Signing** (formerly Trusted Signing). Implemented. Runs when the repository variable `AZURE_SIGNING_ACCOUNT` is set.
+
+1. Create an Artifact Signing account, complete identity validation and create a public-trust certificate profile.
+2. Create an Entra app registration with a federated credential for this repository, entity type "Tag", pattern `v*`. Give it the role "Artifact Signing Certificate Profile Signer" on the profile.
+3. Set these repository variables. No secret is needed: login uses OpenID Connect.
+
+| Variable | Value |
+|---|---|
+| `AZURE_TENANT_ID` | Tenant ID |
+| `AZURE_CLIENT_ID` | App registration client ID |
+| `AZURE_SIGNING_ENDPOINT` | Account endpoint URL |
+| `AZURE_SIGNING_ACCOUNT` | Account name |
+| `AZURE_SIGNING_PROFILE` | Certificate profile name |
+
+The workflow then fails unless both files have a valid Authenticode signature.
+
+**SignPath** (not implemented). Free for open source projects through SignPath Foundation. Install the SignPath GitHub app, store `SIGNPATH_API_TOKEN` as a secret, and replace each signing step with `signpath/github-action-submit-signing-request`: upload the file as an artifact, submit it, and download the signed file. Sign the exe before building the MSI, then sign the MSI.
 
 ## License
 
