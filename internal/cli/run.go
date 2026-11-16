@@ -17,6 +17,7 @@ import (
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/ftpup"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/metrics"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/oplog"
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/tempfiles"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/version"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
 )
@@ -63,6 +64,11 @@ func serve(ctx context.Context, cfgPath string, mirror io.Writer, elog winsvc.Ev
 	if err != nil {
 		return fatal(elog, err)
 	}
+	lease, err := tempfiles.Acquire(cfg.TempDir)
+	if err != nil {
+		return fatal(elog, fmt.Errorf("temporary directory: %w", err))
+	}
+	defer lease.Close()
 	log, logFile, err := oplog.New(cfg.LogDir, mirror)
 	if err != nil {
 		return fatal(elog, err)

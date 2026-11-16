@@ -34,7 +34,7 @@ Error diagnostics are limited to 2 KiB each and to the available AMQP header fra
 
 Dead-letter messages have no active expiration; the original TTL is recorded in `x-original-expiration`. FTP uploads use a temporary remote file and rename it to the destination only after a successful transfer. A failed transfer preserves the existing destination.
 
-If the process stops during a message, RabbitMQ redelivers it and the upload overwrites the file.
+If the process stops during a message, RabbitMQ redelivers it and the upload overwrites the file. At startup, the service locks its temporary directory and removes abandoned download and field files. A second instance sharing that directory fails to start until the first releases it.
 
 The service reconnects to RabbitMQ with exponential backoff (1 s up to `reconnect_max`, default 60 s). On stop it cancels the consumers, waits for the in-flight messages (up to `shutdown_timeout`) and exits.
 

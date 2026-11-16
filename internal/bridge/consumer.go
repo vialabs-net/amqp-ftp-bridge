@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"sync"
@@ -89,7 +90,7 @@ func (b *Bridge) session(ctx context.Context) (bool, error) {
 	host, _ := os.Hostname()
 	props := amqp.NewConnectionProperties()
 	props.SetClientConnectionName("amqp-ftp-bridge@" + host)
-	conn, err := amqp.DialConfig(b.URL, amqp.Config{Heartbeat: b.Heartbeat, Properties: props})
+	conn, transport, err := dialAMQP(ctx, b.URL, amqp.Config{Heartbeat: b.Heartbeat, Properties: props})
 	if err != nil {
 		return false, fmt.Errorf("connect to %s: %w", redact(b.URL), err)
 	}
@@ -97,14 +98,16 @@ func (b *Bridge) session(ctx context.Context) (bool, error) {
 	b.Log.Info("amqp connected", "url", redact(b.URL))
 	defer func() {
 		b.obs().AMQPConnected(false)
-		_ = conn.Close()
+		_ = transport.Close()
 	}()
 	connClosed := conn.NotifyClose(make(chan *amqp.Error, 1))
 
-	// Messages finish even when ctx is cancelled; work is cancelled only
-	// when the shutdown timeout runs out.
+	// Shutdown lets messages finish until the grace period expires. Other
+	// session failures cancel work immediately before joining workers.
 	work, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelWork()
+	// Setup RPCs must also stop promptly when startup is cancelled.
+	stopSetup := context.AfterFunc(ctx, func() { _ = transport.Close() })
+	defer stopSetup()
 
 	type consumer struct {
 		ch  *amqp.Channel
@@ -112,18 +115,23 @@ func (b *Bridge) session(ctx context.Context) (bool, error) {
 	}
 	var consumers []consumer
 	var wg sync.WaitGroup
+	defer func() {
+		if !stopWorkers(cancelWork, transport, &wg, b.shutdownTimeout()) {
+			b.Log.Warn("workers did not stop after cancellation")
+		}
+	}()
 	routeDone := make(chan error, len(b.Processors))
 	for _, p := range b.Processors {
 		ch, deliveries, tag, err := b.setup(conn, p)
 		if err != nil {
 			// Closing the connection ends the consumers already started.
-			_ = conn.Close()
-			wg.Wait()
+			_ = transport.Close()
 			// Not counted as connected, so that the backoff keeps growing.
 			return false, err
 		}
 		consumers = append(consumers, consumer{ch, tag})
 		adapter := newChannel(ch)
+		adapter.transport = transport
 		p.MaxFrameBytes = conn.Config.FrameSize
 		wg.Add(1)
 		go func(p *Processor) {
@@ -140,34 +148,30 @@ func (b *Bridge) session(ctx context.Context) (bool, error) {
 		b.Log.Info("consuming", "queue", p.Route.Queue)
 	}
 
+	stopSetup()
 	select {
 	case <-ctx.Done():
 		b.Log.Info("stopping consumers")
+		grace, cancel := context.WithTimeout(context.Background(), b.shutdownTimeout())
+		defer cancel()
+		stop := context.AfterFunc(grace, func() {
+			cancelWork()
+			_ = transport.Close()
+		})
+		defer stop()
 		for _, c := range consumers {
 			_ = c.ch.Cancel(c.tag, false)
 		}
-		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
-		timeout := b.ShutdownTimeout
-		if timeout <= 0 {
-			timeout = 5 * time.Minute
-		}
-		select {
-		case <-done:
-		case <-time.After(timeout):
+		if !waitWorkers(&wg, time.Until(deadlineOf(grace))) {
 			b.Log.Warn("shutdown timeout: abandoning in-flight messages")
-			cancelWork()
 		}
 		return true, nil
 	case aerr := <-connClosed:
-		wg.Wait()
 		if aerr == nil {
 			return true, errors.New("connection closed")
 		}
 		return true, aerr
 	case rerr := <-routeDone:
-		_ = conn.Close()
-		wg.Wait()
 		return true, rerr
 	}
 }
@@ -219,9 +223,10 @@ func declareDeadLetter(conn *amqp.Connection, r Route) error {
 
 // amqpChannel adapts *amqp.Channel, in confirm mode, to Channel.
 type amqpChannel struct {
-	mu      sync.Mutex
-	ch      *amqp.Channel
-	returns chan amqp.Return
+	mu        sync.Mutex
+	ch        *amqp.Channel
+	returns   chan amqp.Return
+	transport net.Conn
 }
 
 func newChannel(ch *amqp.Channel) *amqpChannel {
@@ -233,6 +238,15 @@ func (a *amqpChannel) Ack(tag uint64) error { return a.ch.Ack(tag, false) }
 func (a *amqpChannel) Nack(tag uint64, requeue bool) error { return a.ch.Nack(tag, false, requeue) }
 
 func (a *amqpChannel) PublishConfirmed(ctx context.Context, exchange, key string, p amqp.Publishing) error {
+	// The library ignores cancellation while writing publish frames. Closing
+	// the shared transport interrupts that write and requeues all unacked work.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if a.transport != nil {
+		stop := context.AfterFunc(ctx, func() { _ = a.transport.Close() })
+		defer stop()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for drained := false; !drained; {
@@ -265,4 +279,74 @@ func (a *amqpChannel) PublishConfirmed(ctx context.Context, exchange, key string
 	default:
 	}
 	return nil
+}
+
+func (b *Bridge) shutdownTimeout() time.Duration {
+	if b.ShutdownTimeout > 0 {
+		return b.ShutdownTimeout
+	}
+	return 5 * time.Minute
+}
+
+func deadlineOf(ctx context.Context) time.Time {
+	deadline, _ := ctx.Deadline()
+	return deadline
+}
+
+// Stop work before joining on every exit path, including partial setup.
+func stopWorkers(cancel context.CancelFunc, transport net.Conn, wg *sync.WaitGroup, timeout time.Duration) bool {
+	cancel()
+	_ = transport.Close()
+	return waitWorkers(wg, timeout)
+}
+
+func waitWorkers(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	timer := time.NewTimer(max(timeout, 0))
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// dialAMQP bounds DNS/TCP/TLS/AMQP setup and makes all of it cancellable.
+func dialAMQP(ctx context.Context, address string, cfg amqp.Config) (*amqp.Connection, net.Conn, error) {
+	const timeout = 30 * time.Second
+	var transport net.Conn
+	stop := func() bool { return true }
+	cfg.Dial = func(network, addr string) (net.Conn, error) {
+		raw, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		transport = &amqpTransport{Conn: raw, timeout: timeout}
+		if err := transport.SetDeadline(time.Now().Add(timeout)); err != nil {
+			_ = transport.Close()
+			return nil, err
+		}
+		stop = context.AfterFunc(ctx, func() { _ = transport.Close() })
+		return transport, nil
+	}
+	conn, err := amqp.DialConfig(address, cfg)
+	stop()
+	if err != nil && transport != nil {
+		_ = transport.Close()
+	}
+	return conn, transport, err
+}
+
+type amqpTransport struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *amqpTransport) Write(p []byte) (int, error) {
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(p)
 }
