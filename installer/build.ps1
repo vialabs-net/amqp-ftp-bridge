@@ -2,9 +2,9 @@
 #
 #   installer/build.ps1 -Version 1.2.3[-rc.1] -Exe dist\amqp-ftp-bridge.exe -Out dist\amqp-ftp-bridge.msi
 #
-# Needs the wix .NET tool and its firewall extension:
+# Needs the wix .NET tool and its firewall and util extensions:
 #   dotnet tool install --global wix --version 5.0.2
-#   wix extension add --global WixToolset.Firewall.wixext/5.0.2
+#   wix extension add --global WixToolset.Firewall.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
 param(
     [Parameter(Mandatory)][string]$Version,
     [Parameter(Mandatory)][string]$Exe,
@@ -22,7 +22,7 @@ if ([int]$Matches[1] -gt 255 -or [int]$Matches[2] -gt 255 -or [int]$Matches[3] -
 $msiVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
 
 $wxs = Join-Path $PSScriptRoot 'amqp-ftp-bridge.wxs'
-wix build $wxs -arch x64 -ext WixToolset.Firewall.wixext `
+wix build $wxs -arch x64 -ext WixToolset.Firewall.wixext -ext WixToolset.Util.wixext `
     -d "ProductVersion=$msiVersion" -d "ExePath=$((Resolve-Path $Exe).Path)" `
     -o $Out
 if ($LASTEXITCODE -ne 0) { throw "wix build failed with exit code $LASTEXITCODE" }

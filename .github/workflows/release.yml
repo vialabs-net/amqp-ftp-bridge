@@ -46,7 +46,7 @@ jobs:
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
           "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION"
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION" "WixToolset.Util.wixext/$env:WIX_VERSION"
 
       - name: Build executable
         shell: bash

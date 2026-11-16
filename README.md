@@ -257,7 +257,7 @@ The integration tests start RabbitMQ and an FTP server with testcontainers.
 ```
 scripts/build-windows.sh 1.2.3 "$(git rev-parse --short=12 HEAD)" dist/amqp-ftp-bridge.exe
 dotnet tool install --global wix --version 5.0.2
-wix extension add --global WixToolset.Firewall.wixext/5.0.2
+wix extension add --global WixToolset.Firewall.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
 installer/build.ps1 -Version 1.2.3 -Exe dist/amqp-ftp-bridge.exe -Out dist/amqp-ftp-bridge.msi
 ```
 

@@ -7,7 +7,8 @@
     ExePath         path to amqp-ftp-bridge.exe
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <!-- NT SERVICE\amqp-ftp-bridge. TestInstallerServiceSID checks it against winsvc.SID. -->
   <?define ServiceSid = "S-1-5-80-603450537-767544045-2868525727-2178660538-2570736133" ?>
@@ -115,11 +116,10 @@
           <!-- The service SID in the process token grants access to the data directories under any account. -->
           <ServiceConfig ServiceSid="unrestricted" FailureActionsWhen="failedToStopOrReturnedError"
                          OnInstall="yes" OnReinstall="yes" />
-          <ServiceConfigFailureActions OnInstall="yes" OnReinstall="yes" ResetPeriod="86400">
-            <Failure Action="restartService" Delay="10000" />
-            <Failure Action="restartService" Delay="10000" />
-            <Failure Action="restartService" Delay="10000" />
-          </ServiceConfigFailureActions>
+          <!-- Windows Installer's own failure actions table cannot set a restart action (access denied). -->
+          <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart" RestartServiceDelayInSeconds="10"
+                              ResetPeriodInDays="1" />
         </ServiceInstall>
         <ServiceControl Id="StopAndRemoveService" Name="$(var.ServiceName)" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
