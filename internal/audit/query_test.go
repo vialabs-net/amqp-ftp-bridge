@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -87,5 +88,28 @@ func TestQuerySharedMessageID(t *testing.T) {
 	n, err := Query(dir, Filter{Date: "2026-03-01", Queue: "a", Result: ResultAcked}, &out)
 	if err != nil || n != 1 || strings.Count(out.String(), "\n") != 2 || strings.Contains(out.String(), `"queue":"b"`) {
 		t.Errorf("cross-queue records or result: %d, %v, %s", n, err, out.String())
+	}
+}
+
+func TestLargeEscapedRecordCanBeReopenedAndQueried(t *testing.T) {
+	dir := t.TempDir()
+	date := time.Date(2026, 3, 1, 10, 0, 0, 0, loc)
+	opts := WithClock(func() time.Time { return date })
+	w, err := NewWriter(dir, "v", "h", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("\x00", 12<<20)
+	if err := w.Write(Record{Step: StepReceived, MsgID: "large", Queue: "q", BodyText: &body}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	w, err = NewWriter(dir, "v", "h", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	if n, err := Query(dir, Filter{Date: "2026-03-01"}, io.Discard); err != nil || n != 1 {
+		t.Errorf("query writer-produced record: %d, %v", n, err)
 	}
 }

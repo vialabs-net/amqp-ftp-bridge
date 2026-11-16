@@ -92,7 +92,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test Windows credential storage
-        run: go test -p 2 -timeout 2m ./internal/creds ./internal/winsvc
+        run: go test -p 2 -timeout 2m ./internal/creds ./internal/winsvc ./internal/cli
       - name: Credential security mutations must fail
         shell: python
         run: |

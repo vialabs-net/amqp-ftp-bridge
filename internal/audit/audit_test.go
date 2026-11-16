@@ -192,3 +192,14 @@ func TestNoSecretsInRecord(t *testing.T) {
 		t.Error(string(b))
 	}
 }
+
+func TestNextMidnightDST(t *testing.T) {
+	zone, err := time.LoadLocation("America/Santiago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 5, 23, 30, 0, 0, zone)
+	if next := NextMidnight(now); !next.After(now) || next.Day() != 6 || next.Hour() != 1 {
+		t.Errorf("next day starts at %v", next)
+	}
+}

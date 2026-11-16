@@ -32,6 +32,8 @@ The dead-letter exchange is `<queue>_deadLetter` (direct, durable) with routing 
 
 Error diagnostics are limited to 2 KiB each and to the available AMQP header frame space. If the original headers leave no space, diagnostics are omitted. The original producer's `user_id` is omitted because RabbitMQ validates it against the publishing account.
 
+Dead-letter messages have no active expiration; the original TTL is recorded in `x-original-expiration`. FTP uploads use a temporary remote file and rename it to the destination only after a successful transfer. A failed transfer preserves the existing destination.
+
 If the process stops during a message, RabbitMQ redelivers it and the upload overwrites the file.
 
 The service reconnects to RabbitMQ with exponential backoff (1 s up to `reconnect_max`, default 60 s). On stop it cancels the consumers, waits for the in-flight messages (up to `shutdown_timeout`) and exits.

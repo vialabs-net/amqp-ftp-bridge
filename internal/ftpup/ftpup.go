@@ -4,6 +4,7 @@ package ftpup
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -153,11 +154,23 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 			return codeOf(err), err
 		}
 	}
+	temporary := path.Join(path.Dir(remote), ".afb-"+rand.Text()+".tmp")
+	committed := false
+	defer func() {
+		if !committed {
+			_ = conn.Delete(temporary)
+		}
+	}()
 	err = conn.Stor(remote, r)
 	if err != nil {
 		e := wrap("stor "+remote, err)
 		return codeOf(e), e
 	}
+	if err := conn.Rename(temporary, remote); err != nil {
+		e := wrap("rename "+remote, err)
+		return codeOf(e), e
+	}
+	committed = true
 	return StatusTransferOK, nil
 }
 

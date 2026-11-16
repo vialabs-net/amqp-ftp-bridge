@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -332,20 +333,30 @@ func fileDay(name string) (string, bool) {
 // NextMidnight returns the next local midnight after t.
 func NextMidnight(t time.Time) time.Time {
 	y, m, d := t.Date()
-	return time.Date(y, m, d+1, 0, 0, 0, 0, t.Location())
+	next := time.Date(y, m, d+1, 0, 0, 0, 0, t.Location())
+	for !next.After(t) || next.Format(dayLayout) == t.Format(dayLayout) {
+		next = next.Add(time.Hour)
+	}
+	return next
 }
 
 func scan(f *os.File, fn func(Record) bool) error {
-	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
-	for s.Scan() {
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if len(line) == 0 {
+			break
+		}
 		var r Record
-		if err := json.Unmarshal(s.Bytes(), &r); err != nil {
+		if err := json.Unmarshal(line, &r); err != nil {
 			continue
 		}
 		if !fn(r) {
 			break
 		}
 	}
-	return s.Err()
+	return nil
 }

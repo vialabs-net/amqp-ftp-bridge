@@ -157,7 +157,7 @@ func (f *fixture) handle(d amqp.Delivery) string {
 
 func delivery(b string) amqp.Delivery {
 	return amqp.Delivery{
-		DeliveryTag: 7, MessageId: "msg-1", UserId: "original-producer", Body: []byte(b), ContentType: "application/json",
+		DeliveryTag: 7, MessageId: "msg-1", Expiration: "1000", UserId: "original-producer", Body: []byte(b), ContentType: "application/json",
 		Headers: amqp.Table{"DestinationPath": "inbox/2026", "trace": "t-1"},
 	}
 }
@@ -207,6 +207,9 @@ func checkDeadLetter(t *testing.T, f *fixture, step, errPart string) audit.Recor
 	p := f.ch.published[0]
 	if p.UserId != "" {
 		t.Error("dead-letter must not impersonate the original producer")
+	}
+	if p.Expiration != "" || p.Headers["x-original-expiration"] != "1000" {
+		t.Error("dead-letter must preserve TTL only as metadata")
 	}
 	if f.ch.exchange != "files.upload_deadLetter" || f.ch.key != "files.upload_deadLetter" {
 		t.Errorf("exchange %q key %q", f.ch.exchange, f.ch.key)
@@ -414,6 +417,9 @@ func TestAckFails(t *testing.T) {
 	f.aud.err = errors.New("disk full") // logged, does not stop the message
 	if got := f.handle(delivery(body)); got != ResultRequeued {
 		t.Errorf("result = %s", got)
+	}
+	if strings.Join(f.obs.done, ",") != ResultRequeued {
+		t.Errorf("missing requeue result: %v", f.obs.done)
 	}
 }
 

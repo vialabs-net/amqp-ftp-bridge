@@ -165,6 +165,7 @@ func (p *Processor) Handle(ctx context.Context, ch Channel, d amqp.Delivery) str
 		// The broker redelivers the message: the upload is repeated and overwrites.
 		p.Log.Warn("ack failed", "queue", q, "msg_id", j.msgID, "err", err)
 		o.Error(q, StageAck, 0)
+		o.Done(q, ResultRequeued)
 		return ResultRequeued
 	}
 	total := p.now().Sub(j.start)
@@ -285,6 +286,9 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 	}
 	delete(headers, p.ErrorHeader)
 	delete(headers, p.StacktraceHeader)
+	if d.Expiration != "" {
+		headers["x-original-expiration"] = d.Expiration
+	}
 	pub := amqp.Publishing{
 		Headers:         headers,
 		ContentType:     d.ContentType,
@@ -293,7 +297,6 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 		Priority:        d.Priority,
 		CorrelationId:   d.CorrelationId,
 		ReplyTo:         d.ReplyTo,
-		Expiration:      d.Expiration,
 		MessageId:       d.MessageId,
 		Timestamp:       d.Timestamp,
 		Type:            d.Type,

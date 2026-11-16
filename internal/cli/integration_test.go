@@ -34,6 +34,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/audit"
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/ftpup"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
 )
 
@@ -510,6 +511,25 @@ func TestIntegrationHappyPath(t *testing.T) {
 		if bytes.Contains(raw, []byte(secret)) {
 			t.Errorf("audit log contains %q", secret)
 		}
+	}
+}
+
+type interruptedReader struct{}
+
+func (interruptedReader) Read([]byte) (int, error) { return 0, fmt.Errorf("interrupted upload") }
+
+func TestIntegrationInterruptedOverwrite(t *testing.T) {
+	_, address := env(t)
+	c := &ftpup.Client{Address: address, User: ftpUser, Password: ftpPass, Timeout: time.Second}
+	const name = "atomic-existing.txt"
+	if _, err := c.Upload(context.Background(), "", name, strings.NewReader("original")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Upload(context.Background(), "", name, io.MultiReader(strings.NewReader("partial"), interruptedReader{})); err == nil {
+		t.Fatal("expected interrupted transfer")
+	}
+	if got := ftpRead(t, address, name); got != "original" {
+		t.Errorf("existing destination changed after failed transfer: %q", got)
 	}
 }
 

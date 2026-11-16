@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -99,8 +100,10 @@ func TestVersionHelpUsage(t *testing.T) {
 func TestServiceCommands(t *testing.T) {
 	_, cfg := writeConfig(t)
 	// On this system the real functions say they need Windows.
-	if code, _, errs := run([]string{"service", "start"}, ""); code != 1 || !strings.Contains(errs, "only available on Windows") {
-		t.Errorf("start: %d %q", code, errs)
+	if runtime.GOOS != "windows" {
+		if code, _, errs := run([]string{"service", "start"}, ""); code != 1 || !strings.Contains(errs, "only available on Windows") {
+			t.Errorf("start: %d %q", code, errs)
+		}
 	}
 	var calls []string
 	hooks := []*func() error{&svcRemove, &svcStart, &svcStop}
@@ -175,8 +178,8 @@ func TestCredsSet(t *testing.T) {
 	if code, _, _ := run([]string{"creds", "set"}, ""); code != 2 {
 		t.Error("creds set without name")
 	}
-	// The environment store of this build refuses to write.
-	newStore = old
+	// The environment store refuses to write on every platform.
+	newStore = func(string) creds.Store { return creds.EnvStore{} }
 	if code, _, errs := run([]string{"creds", "set", "--data-dir", dir, "x"}, "u\np\n"); code != 1 || !strings.Contains(errs, "AFB_CRED_X") {
 		t.Errorf("env store: %d %q", code, errs)
 	}

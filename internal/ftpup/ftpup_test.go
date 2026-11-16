@@ -134,7 +134,7 @@ func TestQuotaFailureDoesNotDeleteDestination(t *testing.T) {
 				return
 			}
 			command := strings.Fields(line)[0]
-			commands = append(commands, command)
+			commands = append(commands, strings.TrimSpace(line))
 			reply := "200 ok\r\n"
 			switch command {
 			case "USER":
@@ -154,7 +154,7 @@ func TestQuotaFailureDoesNotDeleteDestination(t *testing.T) {
 	c := &Client{Address: control.Addr().String(), User: "u", Password: "p", Timeout: time.Second}
 	code, err := c.Upload(context.Background(), "", "existing.txt", strings.NewReader("replacement"))
 	<-done
-	if err == nil || code != 552 || strings.Contains(strings.Join(commands, ","), "DELE") {
+	if err == nil || code != 552 || strings.Contains(strings.Join(commands, ","), "DELE existing.txt") {
 		t.Errorf("quota failure must preserve destination: %d, %v, commands %v", code, err, commands)
 	}
 }

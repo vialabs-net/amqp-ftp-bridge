@@ -65,14 +65,22 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 	var order []messageKey
 	msgs := map[messageKey]*message{}
 	var summaries [][]byte
-	s := bufio.NewScanner(file)
-	s.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
-	for s.Scan() {
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		if len(line) == 0 {
+			break
+		}
 		var r Record
-		if err := json.Unmarshal(s.Bytes(), &r); err != nil {
+		if err := json.Unmarshal(line, &r); err != nil {
 			continue
 		}
-		line := append([]byte(nil), s.Bytes()...)
+		if line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+		}
 		if r.Step == StepDailySummary {
 			summaries = append(summaries, line)
 			continue
@@ -86,9 +94,6 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 		}
 		m.records = append(m.records, r)
 		m.lines = append(m.lines, line)
-	}
-	if err := s.Err(); err != nil {
-		return 0, err
 	}
 
 	n := 0
