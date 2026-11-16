@@ -113,12 +113,12 @@
                         Arguments="run --config &quot;[DATADIR]config.yaml&quot;"
                         Vital="yes">
           <!-- The service SID in the process token grants access to the data directories under any account. -->
-          <ServiceConfig ServiceSid="unrestricted" FailureActionsWhenNonCrashFailures="yes"
+          <ServiceConfig ServiceSid="unrestricted" FailureActionsWhen="failedToStopOrReturnedError"
                          OnInstall="yes" OnReinstall="yes" />
           <ServiceConfigFailureActions OnInstall="yes" OnReinstall="yes" ResetPeriod="86400">
-            <Failure Action="restart" Delay="10000" />
-            <Failure Action="restart" Delay="10000" />
-            <Failure Action="restart" Delay="10000" />
+            <Failure Action="restartService" Delay="10000" />
+            <Failure Action="restartService" Delay="10000" />
+            <Failure Action="restartService" Delay="10000" />
           </ServiceConfigFailureActions>
         </ServiceInstall>
         <ServiceControl Id="StopAndRemoveService" Name="$(var.ServiceName)" Stop="both" Remove="uninstall" Wait="yes" />
