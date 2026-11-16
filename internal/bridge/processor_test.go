@@ -50,6 +50,7 @@ type fakeChannel struct {
 	exchange, key string
 	publishErr    error
 	ackErr        error
+	beforePublish func()
 }
 
 func (f *fakeChannel) Ack(tag uint64) error { f.acked = append(f.acked, tag); return f.ackErr }
@@ -58,6 +59,9 @@ func (f *fakeChannel) Nack(tag uint64, requeue bool) error {
 	return nil
 }
 func (f *fakeChannel) PublishConfirmed(_ context.Context, ex, key string, p amqp.Publishing) error {
+	if f.beforePublish != nil {
+		f.beforePublish()
+	}
 	if f.publishErr != nil {
 		return f.publishErr
 	}
@@ -350,6 +354,34 @@ func TestDeadLetterPublishFails(t *testing.T) {
 	}
 	if f.aud.steps() != "received" {
 		t.Errorf("steps = %s", f.aud.steps())
+	}
+}
+
+func TestDeadLetterAckOrder(t *testing.T) {
+	for _, publishErr := range []error{nil, errors.New("unconfirmed")} {
+		f := newFixture(t, nil)
+		f.dl.err = errors.New("download failed")
+		f.ch.publishErr = publishErr
+		published := false
+		f.ch.beforePublish = func() {
+			published = true
+			if len(f.ch.acked) != 0 {
+				t.Error("original acknowledged before dead-letter confirmation")
+			}
+		}
+		f.handle(delivery(body))
+		if !published || (publishErr == nil && len(f.ch.acked) != 1) || (publishErr != nil && len(f.ch.acked) != 0) {
+			t.Errorf("publish error %v: published %v, acked %v", publishErr, published, f.ch.acked)
+		}
+	}
+}
+
+func TestPublishAfterChannelClosed(t *testing.T) {
+	returns := make(chan amqp.Return)
+	close(returns)
+	a := &amqpChannel{returns: returns}
+	if err := a.PublishConfirmed(context.Background(), "dlx", "dlq", amqp.Publishing{}); !errors.Is(err, amqp.ErrClosed) {
+		t.Errorf("publish on closed channel = %v", err)
 	}
 }
 

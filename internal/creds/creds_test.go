@@ -2,6 +2,7 @@ package creds
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -29,9 +30,14 @@ func TestEnvStore(t *testing.T) {
 
 func TestEnvStoreDefaultLookup(t *testing.T) {
 	t.Setenv("AFB_CRED_RABBITMQ", "u:p")
-	c, err := Default("ignored").Get("rabbitmq")
+	c, err := (EnvStore{}).Get("rabbitmq")
 	if err != nil || c.User != "u" {
 		t.Errorf("%+v %v", c, err)
+	}
+	if runtime.GOOS != "windows" {
+		if c, err := Default("ignored").Get("rabbitmq"); err != nil || c.User != "u" {
+			t.Errorf("default: %+v %v", c, err)
+		}
 	}
 }
 

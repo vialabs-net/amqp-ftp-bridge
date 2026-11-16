@@ -236,7 +236,10 @@ func (a *amqpChannel) PublishConfirmed(ctx context.Context, exchange, key string
 	defer a.mu.Unlock()
 	for drained := false; !drained; {
 		select {
-		case <-a.returns:
+		case _, open := <-a.returns:
+			if !open {
+				return amqp.ErrClosed
+			}
 		default:
 			drained = true
 		}
@@ -253,7 +256,10 @@ func (a *amqpChannel) PublishConfirmed(ctx context.Context, exchange, key string
 		return errors.New("broker refused the message (nack)")
 	}
 	select {
-	case r := <-a.returns:
+	case r, open := <-a.returns:
+		if !open {
+			return amqp.ErrClosed
+		}
 		return fmt.Errorf("message returned as unroutable: %d %s", r.ReplyCode, r.ReplyText)
 	default:
 	}

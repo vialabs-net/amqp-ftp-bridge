@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/textproto"
 	"path"
 	"strings"
@@ -84,7 +85,18 @@ func Join(folder, name string) (string, error) {
 }
 
 func (c *Client) connect(ctx context.Context) (*ftp.ServerConn, error) {
-	conn, err := ftp.Dial(c.Address, ftp.DialWithContext(ctx), ftp.DialWithTimeout(c.Timeout))
+	// The library's DialWithTimeout only bounds the TCP connection. Apply
+	// deadlines and cancellation to both control and passive data sockets.
+	dial := func(network, address string) (net.Conn, error) {
+		d := net.Dialer{Timeout: c.Timeout}
+		raw, err := d.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
+		return &timedConn{Conn: raw, timeout: c.Timeout, stop: stop}, nil
+	}
+	conn, err := ftp.Dial(c.Address, ftp.DialWithDialFunc(dial))
 	if err != nil {
 		return nil, wrap("connect", err)
 	}
@@ -93,6 +105,35 @@ func (c *Client) connect(ctx context.Context) (*ftp.ServerConn, error) {
 		return nil, wrap("login", err)
 	}
 	return conn, nil
+}
+
+type timedConn struct {
+	net.Conn
+	timeout time.Duration
+	stop    func() bool
+}
+
+func (c *timedConn) Read(b []byte) (int, error) {
+	if c.timeout > 0 {
+		if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *timedConn) Write(b []byte) (int, error) {
+	if c.timeout > 0 {
+		if err := c.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *timedConn) Close() error {
+	c.stop()
+	return c.Conn.Close()
 }
 
 // Upload stores r at <folder>/<name> and returns the final reply code.

@@ -3,6 +3,7 @@ package ftpup
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/textproto"
 	"strings"
@@ -62,5 +63,43 @@ func TestConnectFails(t *testing.T) {
 	}
 	if err := c.Check(context.Background()); err == nil {
 		t.Error("check: want error")
+	}
+}
+
+func TestStalledServer(t *testing.T) {
+	for _, greeting := range []string{"", "220 ready\r\n"} {
+		for _, cancelOnly := range []bool{false, true} {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				_, _ = conn.Write([]byte(greeting))
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+			ctx, cancel := context.WithCancel(context.Background())
+			timeout := 50 * time.Millisecond
+			if cancelOnly {
+				timeout = time.Minute
+			}
+			timer := time.AfterFunc(150*time.Millisecond, cancel)
+			c := &Client{Address: ln.Addr().String(), Timeout: timeout}
+			start := time.Now()
+			err = c.Check(ctx)
+			timer.Stop()
+			cancel()
+			ln.Close()
+			<-done
+			if err == nil || time.Since(start) > time.Second {
+				t.Errorf("stalled server: greeting %q, cancel %v: %v after %v", greeting, cancelOnly, err, time.Since(start))
+			}
+		}
 	}
 }

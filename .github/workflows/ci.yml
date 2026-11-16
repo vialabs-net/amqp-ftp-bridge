@@ -81,6 +81,39 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  windows-credentials:
+    name: Windows DPAPI and ACL tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test Windows credential storage
+        run: go test -p 2 -timeout 2m ./internal/creds
+      - name: Credential security mutations must fail
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          path = Path("internal/creds/dpapi_windows.go")
+          original = path.read_text()
+          mutations = [
+              ("plaintext write", "enc, err := protect(plain)", "enc, err := plain, error(nil)", "TestDPAPIStore"),
+              ("plaintext fallback", 'return Credential{}, fmt.Errorf("decrypt: %w", err)', "plain = data", "TestDPAPINoPlaintextFallback"),
+              ("public ACL", "D:P(A;OICI;FA;;;SY)", "D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)", "TestDPAPIStore"),
+          ]
+          for name, old, new, test in mutations:
+              assert original.count(old) == 1
+              try:
+                  path.write_text(original.replace(old, new))
+                  result = subprocess.run(["go", "test", "-p", "2", "-timeout", "2m", "./internal/creds", "-run", "^" + test + "$", "-count=1"], capture_output=True, text=True)
+                  print(name, result.stdout, result.stderr)
+                  if result.returncode == 0 or "--- FAIL: " + test not in result.stdout:
+                      raise RuntimeError("mutation was not detected by its security test")
+              finally:
+                  path.write_text(original)
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
