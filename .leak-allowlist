@@ -1,0 +1,16 @@
+# One extended regex per line, matched against "path:finding".
+# Go module paths and import paths.
+:github\.com$
+:golang\.org$
+:go\.yaml\.in$
+:google\.golang\.org$
+:go\.opentelemetry\.io$
+:honnef\.co$
+# Links in the license, docs and CI.
+^LICENSE:www\.apache\.org$
+:docs\.github\.com$
+:sonarcloud\.io$
+:prometheus\.io$
+:rabbitmq\.com$
+:claude\.com$
+:hub\.docker\.com$

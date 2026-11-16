@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  STATICCHECK_VERSION: v0.8.2
+  GOVULNCHECK_VERSION: v1.9.0
+
+jobs:
+  static:
+    name: Format, vet, lint, vulnerabilities, leaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Not formatted with gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet (linux)
+        run: go vet ./... && go vet -tags integration ./...
+
+      - name: go vet (windows)
+        run: GOOS=windows go vet ./...
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}
+          staticcheck ./...
+          staticcheck -tags integration ./...
+          GOOS=windows staticcheck ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+
+      - name: Leak check
+        run: ./scripts/check-leaks.sh
+
+  test:
+    name: Unit and integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Integration tests start RabbitMQ and FTP containers with testcontainers.
+      - name: Tests with coverage
+        run: go test -race -tags integration -timeout 20m -coverpkg=./... -coverprofile=coverage.out ./...
+
+      - name: Coverage at least 80%
+        run: ./scripts/coverage.sh coverage.out 80
+
+      # The SonarCloud job reuses this report instead of running the tests again.
+      - name: Upload coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 1
+          if-no-files-found: error
+
+  windows-credentials:
+    name: Windows DPAPI, ACL and service tests
+    runs-on: windows-latest
+    env:
+      AFB_TEST_SCM: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test Windows credential storage
+        run: go test -p 2 -timeout 2m ./internal/creds ./internal/winsvc ./internal/cli ./internal/tempfiles
+      - name: Credential security mutations must fail
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          path = Path("internal/creds/dpapi_windows.go")
+          original = path.read_text()
+          mutations = [
+              ("plaintext write", "enc, err := protect(plain)", "enc, err := plain, error(nil)", "TestDPAPIStore"),
+              ("plaintext fallback", 'return Credential{}, fmt.Errorf("decrypt: %w", err)', "plain = data", "TestDPAPINoPlaintextFallback"),
+              ("public ACL", "D:P(A;OICI;FA;;;SY)", "D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)", "TestDPAPIStore"),
+          ]
+          for name, old, new, test in mutations:
+              assert original.count(old) == 1
+              try:
+                  path.write_text(original.replace(old, new))
+                  result = subprocess.run(["go", "test", "-p", "2", "-timeout", "2m", "./internal/creds", "-run", "^" + test + "$", "-count=1"], capture_output=True, text=True)
+                  print(name, result.stdout, result.stderr)
+                  if result.returncode == 0 or "--- FAIL: " + test not in result.stdout:
+                      raise RuntimeError("mutation was not detected by its security test")
+              finally:
+                  path.write_text(original)
+
+      - name: Temporary file ACL mutation must fail
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          path = Path("internal/tempfiles/lock_windows.go")
+          original = path.read_text()
+          old = "D:P(A;OICI;FA;;;SY)"
+          assert original.count(old) == 1
+          try:
+              path.write_text(original.replace(old, "D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)"))
+              result = subprocess.run(["go", "test", "-p", "2", "-timeout", "2m", "./internal/tempfiles", "-run", "^TestTemporaryFilesPrivate$", "-count=1"], capture_output=True, text=True)
+              print(result.stdout, result.stderr)
+              if result.returncode == 0 or "--- FAIL: TestTemporaryFilesPrivate" not in result.stdout:
+                  raise RuntimeError("public temporary ACL was not detected")
+          finally:
+              path.write_text(original)
+
+      - name: Windows stop lifecycle mutations must fail
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          path = Path("internal/winsvc/windows.go")
+          original = path.read_text()
+          cases = [("case <-ticker.C:", "case <-make(chan time.Time):", "TestStopPendingProgress"), ("for st.State != svc.Stopped {", "for false {", "TestStopWaitsAndPropagatesFailure")]
+          for old, new, test in cases:
+              assert original.count(old) == 1
+              try:
+                  path.write_text(original.replace(old, new))
+                  result = subprocess.run(["go", "test", "-p", "2", "-timeout", "30s", "./internal/winsvc", "-run", "^" + test + "$", "-count=1"], capture_output=True, text=True)
+                  print(result.stdout, result.stderr)
+                  if result.returncode == 0 or "--- FAIL: " + test not in result.stdout:
+                      raise RuntimeError("service lifecycle mutation not detected")
+              finally:
+                  path.write_text(original)
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: linux, goarch: amd64, ext: "" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          pkg=github.com/vialabs-net/amqp-ftp-bridge/internal/version
+          go build -trimpath \
+            -ldflags "-s -w -X $pkg.Version=0.0.0-ci -X $pkg.Commit=${GITHUB_SHA::12}" \
+            -o dist/amqp-ftp-bridge${{ matrix.ext }} ./cmd/amqp-ftp-bridge
+
+  sonar:
+    name: SonarCloud
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history for blame data and new-code detection.
+          fetch-depth: 0
+
+      - name: Download coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+
+      # Pull requests from forks have no access to the token.
+      - name: SonarCloud scan
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
