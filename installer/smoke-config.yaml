@@ -1,0 +1,23 @@
+# Configuration for the MSI smoke test in CI. Nothing listens on these
+# addresses: the service keeps reconnecting to RabbitMQ while it runs.
+amqp:
+  url: amqp://127.0.0.1:5672/
+  credential: rabbitmq
+  reconnect_max: 5s
+metrics:
+  listen: 127.0.0.1:9464
+sources:
+  - name: files
+    url_prefix: http://127.0.0.1:8080/files/
+ftp:
+  - name: main
+    address: 127.0.0.1:2121
+    credential: ftp
+routes:
+  - queue: smoke
+    source: files
+    target: main
+    mapping:
+      source_id: data.id
+      folder: literal:incoming
+      file_name: data.name

@@ -104,6 +104,7 @@ jobs:
               ("plaintext write", "enc, err := protect(plain)", "enc, err := plain, error(nil)", "TestDPAPIStore"),
               ("plaintext fallback", 'return Credential{}, fmt.Errorf("decrypt: %w", err)', "plain = data", "TestDPAPINoPlaintextFallback"),
               ("public ACL", "D:P(A;OICI;FA;;;SY)", "D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)", "TestDPAPIStore"),
+              ("legacy ACL not migrated", "if err := restrict(filepath.Join(dir, entry.Name())); err != nil {", "if err := error(nil); err != nil {", "TestSecureLegacyCredentials"),
           ]
           for name, old, new, test in mutations:
               assert original.count(old) == 1
@@ -152,6 +153,45 @@ jobs:
                       raise RuntimeError("service lifecycle mutation not detected")
               finally:
                   path.write_text(original)
+
+  msi:
+    name: MSI build and install smoke test
+    runs-on: windows-latest
+    env:
+      WIX_VERSION: 5.0.2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION" "WixToolset.Util.wixext/$env:WIX_VERSION"
+
+      - name: Build executable
+        shell: bash
+        run: ./scripts/build-windows.sh 0.0.2-ci "${GITHUB_SHA::12}" dist/amqp-ftp-bridge.exe
+
+      # Two versions of the same build, to test a major upgrade.
+      - name: Build MSIs
+        run: |
+          ./installer/build.ps1 -Version 0.0.1 -Exe dist/amqp-ftp-bridge.exe -Out dist/amqp-ftp-bridge-0.0.1.msi
+          ./installer/build.ps1 -Version 0.0.2 -Exe dist/amqp-ftp-bridge.exe -Out dist/amqp-ftp-bridge.msi
+
+      - name: Install, upgrade, start and uninstall
+        run: ./installer/smoke-test.ps1 -OldMsi dist/amqp-ftp-bridge-0.0.1.msi -NewMsi dist/amqp-ftp-bridge.msi -NewVersion 0.0.2
+
+      - name: Upload installer logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msi-logs
+          path: msi-logs/
+          retention-days: 7
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

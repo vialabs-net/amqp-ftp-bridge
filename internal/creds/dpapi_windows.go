@@ -9,14 +9,18 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
 	"golang.org/x/sys/windows"
 )
 
-// aclSDDL grants full control to SYSTEM and Administrators only, with
-// inheritance cut from the parent and passed down to new files.
-const aclSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+// aclSDDL grants full control to SYSTEM and Administrators and read access
+// to the service SID (NT SERVICE\amqp-ftp-bridge), with inheritance cut
+// from the parent and passed down to new files. The service SID lets the
+// service read credentials when it runs under a virtual or other account.
+var aclSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;" + winsvc.SID + ")"
 
 // DPAPIStore keeps credentials encrypted with DPAPI, machine scope, in
 // <Dir>/<name>.bin.
@@ -26,6 +30,41 @@ type DPAPIStore struct {
 
 // Default returns the DPAPI store in <dataDir>/credentials.
 func Default(dataDir string) Store { return DPAPIStore{Dir: filepath.Join(dataDir, "credentials")} }
+
+// Secure migrates protected credential ACLs from versions without a service
+// SID. It requires an administrator and leaves encrypted contents unchanged.
+func Secure(dataDir string) error {
+	dir := filepath.Join(dataDir, "credentials")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := restrict(dir); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".bin") {
+			continue
+		}
+		if err := ValidName(strings.TrimSuffix(entry.Name(), ".bin")); err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("credential %q is not a regular file", entry.Name())
+		}
+		if err := restrict(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Get implements Store.
 func (s DPAPIStore) Get(name string) (Credential, error) {
@@ -51,7 +90,7 @@ func (s DPAPIStore) Get(name string) (Credential, error) {
 }
 
 // Set implements Store. It restricts the directory and the file to SYSTEM
-// and Administrators.
+// and Administrators, with read access for the service.
 func (s DPAPIStore) Set(name string, c Credential) error {
 	if err := ValidName(name); err != nil {
 		return err

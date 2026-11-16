@@ -185,6 +185,29 @@ func TestCredsSet(t *testing.T) {
 	}
 }
 
+func TestCredsSecure(t *testing.T) {
+	old := secureCreds
+	t.Cleanup(func() { secureCreds = old })
+	secureCreds = func(dir string) error {
+		if dir != "data" {
+			t.Fatalf("unexpected data directory: %q", dir)
+		}
+		return errors.New("ACL denied")
+	}
+	if code, _, errs := run([]string{"creds", "secure", "--data-dir", "data"}, ""); code != 1 || !strings.Contains(errs, "ACL denied") {
+		t.Fatalf("migration error lost: %d %s", code, errs)
+	}
+	secureCreds = func(string) error { return nil }
+	if code, _, errs := run([]string{"creds", "secure", "--data-dir", "data"}, ""); code != 0 {
+		t.Fatalf("migration failed: %d %s", code, errs)
+	}
+	for _, args := range [][]string{{"creds", "secure"}, {"creds", "secure", "--data-dir", "data", "extra"}} {
+		if code, _, _ := run(args, ""); code != 2 {
+			t.Fatalf("invalid migration arguments accepted: %v", args)
+		}
+	}
+}
+
 func TestReadSecretTerminal(t *testing.T) {
 	oldT, oldR := isTerminal, readPasswd
 	t.Cleanup(func() { isTerminal, readPasswd = oldT, oldR })

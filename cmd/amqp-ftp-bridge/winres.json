@@ -1,0 +1,41 @@
+{
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "vialabs.amqp-ftp-bridge",
+          "version": ""
+        },
+        "description": "AMQP to FTP bridge service",
+        "minimum-os": "win7",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "unaware",
+        "long-path-aware": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "vialabs",
+            "FileDescription": "AMQP to FTP bridge service",
+            "FileVersion": "0.0.0",
+            "InternalName": "amqp-ftp-bridge",
+            "LegalCopyright": "Apache License 2.0",
+            "OriginalFilename": "amqp-ftp-bridge.exe",
+            "ProductName": "amqp-ftp-bridge",
+            "ProductVersion": "0.0.0"
+          }
+        }
+      }
+    }
+  }
+}

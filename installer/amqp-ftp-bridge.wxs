@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  amqp-ftp-bridge MSI (WiX Toolset v5). Build with installer/build.ps1.
+
+  Preprocessor variables:
+    ProductVersion  MSI version, three numeric fields (1.2.3)
+    ExePath         path to amqp-ftp-bridge.exe
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!-- NT SERVICE\amqp-ftp-bridge. TestInstallerServiceSID checks it against winsvc.SID. -->
+  <?define ServiceSid = "S-1-5-80-603450537-767544045-2868525727-2178660538-2570736133" ?>
+  <?define ServiceName = "amqp-ftp-bridge" ?>
+  <!-- SYSTEM and Administrators: full control. Inheritance from ProgramData is cut. -->
+  <?define AdminAces = "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" ?>
+
+  <Package Name="amqp-ftp-bridge"
+           Manufacturer="vialabs"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="3DB348F1-37FC-4ECA-9BC8-FC6AA80A591F"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="amqp-ftp-bridge $(var.ProductVersion)" />
+
+    <!-- Same-version upgrades let a final release replace its release candidate. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of amqp-ftp-bridge is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Legacy credential files have protected ACLs, so folder inheritance
+         alone cannot grant the new service account access. Never decrypt or
+         rewrite their contents. Run elevated after the executable is installed. -->
+    <CustomAction Id="SecureCredentials" FileRef="BridgeExe"
+                  ExeCommand="creds secure --data-dir &quot;[DATADIR].&quot;"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="GrantServiceLogon" FileRef="BridgeExe"
+                  ExeCommand="service grant-logon --account &quot;[SERVICE_ACCOUNT]&quot;"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="GrantServiceLogon" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="SecureCredentials" After="GrantServiceLogon" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <Property Id="ARPHELPLINK" Value="https://github.com/vialabs-net/amqp-ftp-bridge" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!--
+      Public properties. SERVICE_ACCOUNT, METRICS_ALLOW_FROM and METRICS_PORT are
+      stored in the registry and reused by upgrades that do not pass them.
+      SERVICE_PASSWORD is never stored.
+    -->
+    <Property Id="SERVICE_ACCOUNT" Secure="yes" />
+    <Property Id="SERVICE_PASSWORD" Secure="yes" Hidden="yes" />
+    <Property Id="CONFIG_FILE" Secure="yes" />
+    <Property Id="METRICS_ALLOW_FROM" Secure="yes" />
+    <Property Id="METRICS_PORT" Secure="yes" />
+
+    <Property Id="SAVED_SERVICE_ACCOUNT">
+      <RegistrySearch Id="SavedServiceAccount" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
+                      Name="ServiceAccount" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="SAVED_METRICS_ALLOW_FROM">
+      <RegistrySearch Id="SavedMetricsAllowFrom" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
+                      Name="MetricsAllowFrom" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="SAVED_METRICS_PORT">
+      <RegistrySearch Id="SavedMetricsPort" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
+                      Name="MetricsPort" Type="raw" Bitness="always64" />
+    </Property>
+
+    <!-- Set when %ProgramData%\amqp-ftp-bridge\config.yaml exists before the install. -->
+    <Property Id="CONFIG_PRESENT">
+      <DirectorySearch Id="DataDirSearch" Path="[CommonAppDataFolder]amqp-ftp-bridge" Depth="0">
+        <FileSearch Id="ConfigSearch" Name="config.yaml" />
+      </DirectorySearch>
+    </Property>
+
+    <!-- Command line first, then the saved value, then the default. -->
+    <SetProperty Id="SERVICE_ACCOUNT" Action="RestoreServiceAccount" Value="[SAVED_SERVICE_ACCOUNT]"
+                 After="AppSearch" Sequence="first" Condition="NOT SERVICE_ACCOUNT AND SAVED_SERVICE_ACCOUNT" />
+    <SetProperty Id="SERVICE_ACCOUNT" Action="DefaultServiceAccount" Value="NT SERVICE\$(var.ServiceName)"
+                 After="RestoreServiceAccount" Sequence="first" Condition="NOT SERVICE_ACCOUNT" />
+    <SetProperty Id="METRICS_ALLOW_FROM" Action="RestoreMetricsAllowFrom" Value="[SAVED_METRICS_ALLOW_FROM]"
+                 After="DefaultServiceAccount" Sequence="first" Condition="NOT METRICS_ALLOW_FROM AND SAVED_METRICS_ALLOW_FROM" />
+    <SetProperty Id="METRICS_PORT" Action="RestoreMetricsPort" Value="[SAVED_METRICS_PORT]"
+                 After="RestoreMetricsAllowFrom" Sequence="first" Condition="NOT METRICS_PORT AND SAVED_METRICS_PORT" />
+    <SetProperty Id="METRICS_PORT" Action="DefaultMetricsPort" Value="9464"
+                 After="RestoreMetricsPort" Sequence="first" Condition="NOT METRICS_PORT" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="amqp-ftp-bridge" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATADIR" Name="amqp-ftp-bridge">
+        <Directory Id="LOGDIR" Name="logs" />
+        <Directory Id="CREDDIR" Name="credentials" />
+        <Directory Id="TMPDIR" Name="tmp" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="amqp-ftp-bridge" Level="1">
+      <ComponentRef Id="Executable" />
+      <ComponentRef Id="ConfigExample" />
+      <ComponentRef Id="DataDirectories" />
+      <ComponentRef Id="Settings" />
+      <ComponentRef Id="EventLogSource" />
+      <ComponentRef Id="StartService" />
+      <ComponentRef Id="CopyConfig" />
+      <ComponentRef Id="MetricsFirewallRule" />
+    </Feature>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Executable" Bitness="always64">
+        <File Id="BridgeExe" Name="amqp-ftp-bridge.exe" Source="$(var.ExePath)" KeyPath="yes" />
+        <ServiceInstall Id="BridgeService"
+                        Name="$(var.ServiceName)"
+                        DisplayName="AMQP FTP Bridge"
+                        Description="Consumes RabbitMQ queues, downloads each referenced file over HTTP and uploads it by FTP."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="[SERVICE_ACCOUNT]"
+                        Password="[SERVICE_PASSWORD]"
+                        Arguments="run --config &quot;[DATADIR]config.yaml&quot;"
+                        Vital="yes">
+          <!-- The service SID in the process token grants access to the data directories under any account. -->
+          <ServiceConfig ServiceSid="unrestricted" FailureActionsWhen="failedToStopOrReturnedError"
+                         OnInstall="yes" OnReinstall="yes" />
+          <!-- Windows Installer's own failure actions table cannot set a restart action (access denied). -->
+          <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart" RestartServiceDelayInSeconds="10"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Id="StopAndRemoveService" Name="$(var.ServiceName)" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+
+      <Component Id="ConfigExample" Bitness="always64">
+        <File Id="ConfigExampleYaml" Name="config.example.yaml" Source="$(sys.SOURCEFILEDIR)..\config.example.yaml" KeyPath="yes" />
+      </Component>
+
+      <!--
+        Data directories. The service SID gets the access the service needs; the
+        credential and temporary ACLs match those the service itself applies.
+        Uninstall removes them only when empty: config, credentials and logs stay.
+      -->
+      <Component Id="DataDirectories" Bitness="always64">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge" Name="DataDirectories" Type="integer" Value="1" KeyPath="yes" />
+        <!-- Read and execute for the service: config.yaml. -->
+        <CreateFolder Directory="DATADIR">
+          <PermissionEx Sddl="D:P$(var.AdminAces)(A;OICI;0x1200a9;;;$(var.ServiceSid))" />
+        </CreateFolder>
+        <!-- Modify for the service. -->
+        <CreateFolder Directory="LOGDIR">
+          <PermissionEx Sddl="D:P$(var.AdminAces)(A;OICI;0x1301bf;;;$(var.ServiceSid))" />
+        </CreateFolder>
+        <!-- Read for the service. Same ACL as internal/creds. -->
+        <CreateFolder Directory="CREDDIR">
+          <PermissionEx Sddl="D:P$(var.AdminAces)(A;OICI;FR;;;$(var.ServiceSid))" />
+        </CreateFolder>
+        <!-- Full control for the service, which re-applies this ACL. Same ACL as internal/tempfiles. -->
+        <CreateFolder Directory="TMPDIR">
+          <PermissionEx Sddl="D:P$(var.AdminAces)(A;OICI;FA;;;$(var.ServiceSid))" />
+        </CreateFolder>
+      </Component>
+
+      <Component Id="Settings" Bitness="always64">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge">
+          <RegistryValue Name="ServiceAccount" Type="string" Value="[SERVICE_ACCOUNT]" KeyPath="yes" />
+          <RegistryValue Name="MetricsPort" Type="string" Value="[METRICS_PORT]" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Same registration as "service install": EventCreate.exe as the message file. -->
+      <Component Id="EventLogSource" Bitness="always64">
+        <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\$(var.ServiceName)">
+          <RegistryValue Name="EventMessageFile" Type="expandable" Value="%SystemRoot%\System32\EventCreate.exe" KeyPath="yes" />
+          <RegistryValue Name="TypesSupported" Type="integer" Value="7" />
+          <RegistryValue Name="CustomSource" Type="integer" Value="1" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Start the service at the end of the install only when a configuration exists. -->
+      <Component Id="StartService" Bitness="always64" Condition="CONFIG_PRESENT OR CONFIG_FILE">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge" Name="StartedOnInstall" Type="integer" Value="1" KeyPath="yes" />
+        <!-- Wait="no": missing credentials make the service stop, not the install fail. -->
+        <ServiceControl Id="StartBridgeService" Name="$(var.ServiceName)" Start="install" Wait="no" />
+      </Component>
+
+      <!--
+        CONFIG_FILE: full path of a configuration copied to the data directory,
+        replacing an existing one. Windows Installer does not remove copied
+        files on uninstall, so the configuration stays.
+      -->
+      <Component Id="CopyConfig" Bitness="always64" Condition="CONFIG_FILE">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge" Name="ConfigCopied" Type="integer" Value="1" KeyPath="yes" />
+        <CopyFile Id="CopyConfigFile" SourceProperty="CONFIG_FILE" DestinationDirectory="DATADIR" DestinationName="config.yaml" />
+      </Component>
+
+      <!-- METRICS_ALLOW_FROM: inbound TCP to METRICS_PORT, from that address only. -->
+      <Component Id="MetricsFirewallRule" Bitness="always64" Condition="METRICS_ALLOW_FROM">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge" Name="MetricsAllowFrom" Type="string" Value="[METRICS_ALLOW_FROM]" KeyPath="yes" />
+        <fw:FirewallException Id="MetricsFirewall"
+                              Name="amqp-ftp-bridge metrics"
+                              Description="Prometheus metrics of amqp-ftp-bridge"
+                              Program="[#BridgeExe]"
+                              Port="[METRICS_PORT]"
+                              Protocol="tcp"
+                              Profile="all">
+          <fw:RemoteAddress Value="[METRICS_ALLOW_FROM]" />
+        </fw:FirewallException>
+      </Component>
+    </DirectoryRef>
+  </Package>
+</Wix>

@@ -3,8 +3,10 @@
 package tempfiles
 
 import (
-	"golang.org/x/sys/windows"
 	"os"
+
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
+	"golang.org/x/sys/windows"
 )
 
 func lock(f *os.File) error {
@@ -12,9 +14,10 @@ func lock(f *os.File) error {
 }
 
 // A Go file mode does not restrict a Windows DACL. Protect downloads and
-// upload_field contents before creating any temporary file.
+// upload_field contents before creating any temporary file. SYSTEM,
+// Administrators and the service SID (NT SERVICE\amqp-ftp-bridge) only.
 func secureDir(dir string) error {
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + winsvc.SID + ")")
 	if err != nil {
 		return err
 	}
