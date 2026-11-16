@@ -95,7 +95,7 @@ foreach ($dir in @($data, "$data\logs", "$data\credentials", "$data\tmp")) {
     Check (Test-Path $dir) "$dir exists"
     Assert-PrivateAcl $dir
 }
-Check ((Get-Rule).Count -eq 0) 'no firewall rule without METRICS_ALLOW_FROM'
+Check (@(Get-Rule).Count -eq 0) 'no firewall rule without METRICS_ALLOW_FROM'
 Check (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$name") 'event log source registered'
 
 # 2. Credentials, as an administrator would store them.
@@ -107,7 +107,7 @@ Assert-PrivateAcl "$data\credentials\rabbitmq.bin"
 
 # 3. Major upgrade with CONFIG_FILE and METRICS_ALLOW_FROM: service starts.
 Invoke-Msi @('/i', "`"$NewMsi`"", "CONFIG_FILE=`"$config`"", "METRICS_ALLOW_FROM=$allowFrom")
-$products = Get-Products
+$products = @(Get-Products)
 Check ($products.Count -eq 1) "one installed product after the upgrade (got $($products.Count))"
 Check ($products[0].DisplayVersion -eq $NewVersion) "upgraded to $NewVersion (got $($products[0].DisplayVersion))"
 Check ((Get-Content "$data\config.yaml" -Raw) -eq (Get-Content $config -Raw)) 'CONFIG_FILE copied'
@@ -120,7 +120,7 @@ Start-Sleep -Seconds 15
 $after = Get-CimInstance Win32_Service -Filter "Name='$name'"
 Check ($after.State -eq 'Running' -and $after.ProcessId -eq $servicePid) 'service keeps running'
 Check (@(Get-ChildItem "$data\logs" -Filter 'service-*.log').Count -ge 1) 'service writes its log'
-$rule = Get-Rule
+$rule = @(Get-Rule)
 Check ($rule.Count -eq 1) 'firewall rule created'
 $addr = ($rule[0] | Get-NetFirewallAddressFilter).RemoteAddress
 $port = ($rule[0] | Get-NetFirewallPortFilter)
@@ -132,8 +132,8 @@ Check ($rule[0].Direction -eq 'Inbound' -and $rule[0].Action -eq 'Allow') 'firew
 Invoke-Msi @('/x', "`"$NewMsi`"")
 Check (-not (Get-Service $name -ErrorAction SilentlyContinue)) 'service removed'
 Check (-not (Test-Path $exe)) 'program removed'
-Check ((Get-Rule).Count -eq 0) 'firewall rule removed'
-Check ((Get-Products).Count -eq 0) 'product removed'
+Check (@(Get-Rule).Count -eq 0) 'firewall rule removed'
+Check (@(Get-Products).Count -eq 0) 'product removed'
 Check (-not (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$name")) 'event log source removed'
 Check (Test-Path "$data\config.yaml") 'configuration kept'
 Check (Test-Path "$data\credentials\rabbitmq.bin") 'credentials kept'
