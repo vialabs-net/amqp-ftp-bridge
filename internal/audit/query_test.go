@@ -64,3 +64,28 @@ func TestQuery(t *testing.T) {
 		t.Error("want error for missing file today")
 	}
 }
+
+func TestQuerySharedMessageID(t *testing.T) {
+	dir := t.TempDir()
+	date := time.Date(2026, 3, 1, 10, 0, 0, 0, loc)
+	w, err := NewWriter(dir, "v", "h", WithClock(func() time.Time { return date }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []Record{
+		{Step: StepReceived, MsgID: "shared", Queue: "a"},
+		{Step: StepAcked, MsgID: "shared", Queue: "a"},
+		{Step: StepReceived, MsgID: "shared", Queue: "b"},
+		{Step: StepDeadLettered, MsgID: "shared", Queue: "b"},
+	} {
+		if err := w.Write(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Close()
+	var out bytes.Buffer
+	n, err := Query(dir, Filter{Date: "2026-03-01", Queue: "a", Result: ResultAcked}, &out)
+	if err != nil || n != 1 || strings.Count(out.String(), "\n") != 2 || strings.Contains(out.String(), `"queue":"b"`) {
+		t.Errorf("cross-queue records or result: %d, %v, %s", n, err, out.String())
+	}
+}

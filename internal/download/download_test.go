@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,5 +115,20 @@ func TestCheck(t *testing.T) {
 func TestStripURL(t *testing.T) {
 	if got := stripURL(errors.New("plain")); got.Error() != "plain" {
 		t.Error(got)
+	}
+}
+
+func TestSourceIDCannotChangeAuthority(t *testing.T) {
+	for _, prefix := range []string{"https://files.example.com", "https://files.example.com/", "https://files.example.com/api/"} {
+		for _, id := range []string{"@attacker.example", ":123@attacker.example", "//attacker.example/a", "a?token=secret#fragment", "a/b"} {
+			got, err := New(prefix, "reader", "secret", "", time.Second).URL(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			u, err := url.Parse(got)
+			if err != nil || u.Host != "files.example.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+				t.Errorf("source id changed authority or query: %q, %v", got, err)
+			}
+		}
 	}
 }

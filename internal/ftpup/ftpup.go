@@ -155,18 +155,6 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 	}
 	err = conn.Stor(remote, r)
 	if err != nil {
-		var te *textproto.Error
-		// Some servers refuse to replace a file: delete it and try once more
-		// when the input can be rewound.
-		if seeker, ok := r.(io.Seeker); ok && errors.As(err, &te) && te.Code >= 550 && te.Code <= 553 {
-			if derr := conn.Delete(remote); derr == nil {
-				if _, serr := seeker.Seek(0, io.SeekStart); serr == nil {
-					err = conn.Stor(remote, r)
-				}
-			}
-		}
-	}
-	if err != nil {
 		e := wrap("stor "+remote, err)
 		return codeOf(e), e
 	}

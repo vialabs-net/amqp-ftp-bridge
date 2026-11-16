@@ -108,6 +108,10 @@ func Install(exePath, configPath string) error {
 		_ = s.Delete()
 		return fmt.Errorf("set recovery actions: %w", err)
 	}
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		_ = s.Delete()
+		return fmt.Errorf("enable recovery after service errors: %w", err)
+	}
 	if err := eventlog.InstallAsEventCreate(Name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
 		// A source left by an earlier install is fine.
 		if !strings.Contains(err.Error(), "already exists") {

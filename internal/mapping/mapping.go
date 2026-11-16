@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -39,6 +40,9 @@ func Parse(body []byte, headers map[string]any) (*Message, error) {
 	dec.UseNumber()
 	if err := dec.Decode(&m.body); err != nil {
 		return m, fmt.Errorf("body is not valid JSON: %w", err)
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return m, errors.New("body must contain exactly one JSON value")
 	}
 	m.parsed = true
 	return m, nil

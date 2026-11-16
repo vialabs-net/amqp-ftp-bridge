@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -81,7 +82,9 @@ type Processor struct {
 	RequeueDelay time.Duration
 	// PublishTimeout bounds the dead-letter publish and its confirmation.
 	PublishTimeout time.Duration
-	Now            func() time.Time
+	// MaxFrameBytes is the negotiated AMQP frame limit (zero uses 128 KiB).
+	MaxFrameBytes int
+	Now           func() time.Time
 }
 
 type job struct {
@@ -280,8 +283,8 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 	for k, v := range d.Headers {
 		headers[k] = v
 	}
-	headers[p.ErrorHeader] = err.Error()
-	headers[p.StacktraceHeader] = ErrorChain(err)
+	delete(headers, p.ErrorHeader)
+	delete(headers, p.StacktraceHeader)
 	pub := amqp.Publishing{
 		Headers:         headers,
 		ContentType:     d.ContentType,
@@ -294,10 +297,10 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 		MessageId:       d.MessageId,
 		Timestamp:       d.Timestamp,
 		Type:            d.Type,
-		UserId:          d.UserId,
 		AppId:           d.AppId,
 		Body:            d.Body,
 	}
+	p.addDiagnostics(&pub, err)
 	timeout := p.PublishTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -337,6 +340,56 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 	p.Log.Info("message dead-lettered", "queue", q, "msg_id", j.msgID, "step", se.Step, "err", err)
 	p.obs().Done(q, ResultDeadLettered)
 	return ResultDeadLettered
+}
+
+// Header frames cannot be split. Keep the original headers and use only the
+// remaining frame space for diagnostics, with a 2 KiB cap per diagnostic.
+func (p *Processor) addDiagnostics(pub *amqp.Publishing, err error) {
+	limit := p.MaxFrameBytes
+	if limit <= 0 {
+		limit = 128 * 1024
+	}
+	// 64 bytes cover frame, content header, flags and scalar properties.
+	used := 64 + fieldSize(pub.Headers)
+	for _, s := range []string{pub.ContentType, pub.ContentEncoding, pub.CorrelationId, pub.ReplyTo, pub.Expiration, pub.MessageId, pub.Type, pub.UserId, pub.AppId} {
+		used += len(s) + 1
+	}
+	available := limit - used - len(p.ErrorHeader) - len(p.StacktraceHeader) - 12
+	if available < 0 {
+		return // Original headers leave no room for diagnostic fields.
+	}
+	budget := min(available/2, 2048)
+	for key, value := range map[string]string{p.ErrorHeader: err.Error(), p.StacktraceHeader: ErrorChain(err)} {
+		if len(value) > budget {
+			value = strings.ToValidUTF8(value[:budget], "")
+		}
+		pub.Headers[key] = value
+	}
+}
+
+// fieldSize conservatively bounds the AMQP field encoding, including its
+// type byte. Nine bytes cover every fixed-size AMQP scalar.
+func fieldSize(value any) int {
+	switch v := value.(type) {
+	case string:
+		return 5 + len(v)
+	case []byte:
+		return 5 + len(v)
+	case amqp.Table:
+		n := 5
+		for key, value := range v {
+			n += 1 + len(key) + fieldSize(value)
+		}
+		return n
+	case []any:
+		n := 5
+		for _, value := range v {
+			n += fieldSize(value)
+		}
+		return n
+	default:
+		return 9
+	}
 }
 
 func compact(b []byte) []byte {

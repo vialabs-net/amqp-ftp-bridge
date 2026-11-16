@@ -1,8 +1,10 @@
 package ftpup
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/textproto"
@@ -101,5 +103,58 @@ func TestStalledServer(t *testing.T) {
 				t.Errorf("stalled server: greeting %q, cancel %v: %v after %v", greeting, cancelOnly, err, time.Since(start))
 			}
 		}
+	}
+}
+
+func TestQuotaFailureDoesNotDeleteDestination(t *testing.T) {
+	control, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	data, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	done := make(chan struct{})
+	var commands []string
+	go func() {
+		defer close(done)
+		conn, err := control.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		fmt.Fprint(conn, "220 ready\r\n")
+		r := bufio.NewReader(conn)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			command := strings.Fields(line)[0]
+			commands = append(commands, command)
+			reply := "200 ok\r\n"
+			switch command {
+			case "USER":
+				reply = "230 logged in\r\n"
+			case "FEAT":
+				reply = "211 no features\r\n"
+			case "EPSV":
+				reply = fmt.Sprintf("229 (|||%d|)\r\n", data.Addr().(*net.TCPAddr).Port)
+			case "STOR":
+				reply = "552 quota exceeded\r\n"
+			case "QUIT":
+				return
+			}
+			fmt.Fprint(conn, reply)
+		}
+	}()
+	c := &Client{Address: control.Addr().String(), User: "u", Password: "p", Timeout: time.Second}
+	code, err := c.Upload(context.Background(), "", "existing.txt", strings.NewReader("replacement"))
+	<-done
+	if err == nil || code != 552 || strings.Contains(strings.Join(commands, ","), "DELE") {
+		t.Errorf("quota failure must preserve destination: %d, %v, commands %v", code, err, commands)
 	}
 }

@@ -60,6 +60,21 @@ func TestNotJSON(t *testing.T) {
 	}
 }
 
+func TestTrailingJSON(t *testing.T) {
+	for _, body := range []string{`{"data":{"id":"one"}} trailing`, `{"data":{"id":"one"}} {"data":{"id":"two"}}`} {
+		m, err := Parse([]byte(body), map[string]any{"H": "v"})
+		if err == nil {
+			t.Errorf("invalid JSON accepted: %s", body)
+		}
+		if _, err := m.String("data.id"); err == nil {
+			t.Error("JSON paths must fail on an invalid body")
+		}
+		if got, err := m.String("header:H"); err != nil || got != "v" {
+			t.Errorf("header selector on invalid body: %q, %v", got, err)
+		}
+	}
+}
+
 func TestJSON(t *testing.T) {
 	m, _ := Parse([]byte(body), map[string]any{"B": []byte("raw")})
 	got, err := m.JSON("data._file")

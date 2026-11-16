@@ -609,6 +609,14 @@ func TestIntegrationUnmatched(t *testing.T) {
 	if r := waitStep(t, logDir, "um-1", audit.StepReceived); r.Event == nil || *r.Event != "delete" || *r.Matched {
 		t.Errorf("received = %+v", r)
 	}
+	publish(t, conn, qDL, "um-large", strings.Repeat("x", 50000), "F-1", "a.json", "legacy")
+	large := getDeadLetter(t, conn, qDL+"_deadLetter")
+	for _, key := range []string{"x-error", "x-error-stacktrace"} {
+		if diagnostic, _ := large.Headers[key].(string); len(diagnostic) > 2048 {
+			t.Errorf("oversized %s: %d bytes", key, len(diagnostic))
+		}
+	}
+	waitStep(t, logDir, "um-large", audit.StepDeadLettered)
 
 	publish(t, conn, qField, "um-2", "update", "F-2", "b.json", "legacy")
 	waitStep(t, logDir, "um-2", audit.StepAcked)

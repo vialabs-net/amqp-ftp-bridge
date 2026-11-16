@@ -61,8 +61,9 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 		records []Record
 		lines   [][]byte
 	}
-	var order []string
-	msgs := map[string]*message{}
+	type messageKey struct{ queue, id string }
+	var order []messageKey
+	msgs := map[messageKey]*message{}
 	var summaries [][]byte
 	s := bufio.NewScanner(file)
 	s.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
@@ -76,11 +77,12 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 			summaries = append(summaries, line)
 			continue
 		}
-		m := msgs[r.MsgID]
+		key := messageKey{r.Queue, r.MsgID}
+		m := msgs[key]
 		if m == nil {
 			m = &message{}
-			msgs[r.MsgID] = m
-			order = append(order, r.MsgID)
+			msgs[key] = m
+			order = append(order, key)
 		}
 		m.records = append(m.records, r)
 		m.lines = append(m.lines, line)

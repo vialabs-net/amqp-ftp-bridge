@@ -30,6 +30,8 @@ For each message, with `prefetch=1` and manual acknowledgement:
 
 The dead-letter exchange is `<queue>_deadLetter` (direct, durable) with routing key `<queue>_deadLetter`. The original message is acked only after the broker confirms the dead-letter publish. If that publish fails, the message is requeued after 5 seconds. There are no retries.
 
+Error diagnostics are limited to 2 KiB each and to the available AMQP header frame space. If the original headers leave no space, diagnostics are omitted. The original producer's `user_id` is omitted because RabbitMQ validates it against the publishing account.
+
 If the process stops during a message, RabbitMQ redelivers it and the upload overwrites the file.
 
 The service reconnects to RabbitMQ with exponential backoff (1 s up to `reconnect_max`, default 60 s). On stop it cancels the consumers, waits for the in-flight messages (up to `shutdown_timeout`) and exits.

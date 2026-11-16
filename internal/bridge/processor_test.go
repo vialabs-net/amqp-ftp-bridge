@@ -157,7 +157,7 @@ func (f *fixture) handle(d amqp.Delivery) string {
 
 func delivery(b string) amqp.Delivery {
 	return amqp.Delivery{
-		DeliveryTag: 7, MessageId: "msg-1", Body: []byte(b), ContentType: "application/json",
+		DeliveryTag: 7, MessageId: "msg-1", UserId: "original-producer", Body: []byte(b), ContentType: "application/json",
 		Headers: amqp.Table{"DestinationPath": "inbox/2026", "trace": "t-1"},
 	}
 }
@@ -205,6 +205,9 @@ func checkDeadLetter(t *testing.T, f *fixture, step, errPart string) audit.Recor
 		t.Fatalf("published %d", len(f.ch.published))
 	}
 	p := f.ch.published[0]
+	if p.UserId != "" {
+		t.Error("dead-letter must not impersonate the original producer")
+	}
 	if f.ch.exchange != "files.upload_deadLetter" || f.ch.key != "files.upload_deadLetter" {
 		t.Errorf("exchange %q key %q", f.ch.exchange, f.ch.key)
 	}
@@ -382,6 +385,26 @@ func TestPublishAfterChannelClosed(t *testing.T) {
 	a := &amqpChannel{returns: returns}
 	if err := a.PublishConfirmed(context.Background(), "dlx", "dlq", amqp.Publishing{}); !errors.Is(err, amqp.ErrClosed) {
 		t.Errorf("publish on closed channel = %v", err)
+	}
+}
+
+func TestLargeDeadLetterDiagnostics(t *testing.T) {
+	for _, padding := range []int{0, 3700, 3900} {
+		f := newFixture(t, matchUpload)
+		f.p.MaxFrameBytes = 4096
+		d := delivery(strings.Replace(body, `"upload"`, `"`+strings.Repeat("x", 50000)+`"`, 1))
+		d.Headers["padding"] = strings.Repeat("p", padding)
+		if got := f.handle(d); got != ResultDeadLettered {
+			t.Fatalf("result = %s", got)
+		}
+		pub := f.ch.published[0]
+		if string(pub.Body) != string(d.Body) || pub.Headers["padding"] != d.Headers["padding"] || len(f.ch.acked) != 1 {
+			t.Error("original body, headers or acknowledgment lost")
+		}
+		// All other properties in this fixture fit in the 64-byte reserve.
+		if size := fieldSize(pub.Headers) + 64; size > 4096 {
+			t.Errorf("dead-letter headers exceed frame limit: %d", size)
+		}
 	}
 }
 

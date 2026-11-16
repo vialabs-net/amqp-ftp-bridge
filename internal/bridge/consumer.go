@@ -124,6 +124,7 @@ func (b *Bridge) session(ctx context.Context) (bool, error) {
 		}
 		consumers = append(consumers, consumer{ch, tag})
 		adapter := newChannel(ch)
+		p.MaxFrameBytes = conn.Config.FrameSize
 		wg.Add(1)
 		go func(p *Processor) {
 			defer wg.Done()

@@ -55,7 +55,17 @@ func (c *Client) URL(id string) (string, error) {
 	if id == "" || id == "." || id == ".." {
 		return "", fmt.Errorf("invalid source id %q", id)
 	}
-	return c.Prefix + url.PathEscape(id), nil
+	u, err := url.Parse(c.Prefix)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid source URL prefix")
+	}
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	escaped := u.EscapedPath() + url.PathEscape(id)
+	u.Path += id
+	u.RawPath = escaped
+	return u.String(), nil
 }
 
 // Host returns the host of the prefix, without user information.
