@@ -10,8 +10,11 @@ import (
 	"io"
 	"net"
 	"net/textproto"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jlaffaye/ftp"
@@ -26,6 +29,9 @@ type Client struct {
 	User     string
 	Password string
 	Timeout  time.Duration
+	// RecoveryDir is private to one route, under the service's locked temp dir.
+	RecoveryDir string
+	mu          sync.Mutex
 }
 
 // Error is a failed FTP operation with the server reply code, if any.
@@ -138,7 +144,9 @@ func (c *timedConn) Close() error {
 }
 
 // Upload stores r at <folder>/<name> and returns the final reply code.
-func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (int, error) {
+func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (code int, resultErr error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	remote, err := Join(folder, name)
 	if err != nil {
 		return 0, err
@@ -148,6 +156,9 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 		return codeOf(err), err
 	}
 	defer func() { _ = conn.Quit() }()
+	if err := c.recover(conn); err != nil {
+		return 0, err
+	}
 
 	if dir := path.Dir(remote); dir != "." && dir != "/" {
 		if err := mkdirAll(conn, dir); err != nil {
@@ -155,10 +166,35 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 		}
 	}
 	temporary := path.Join(path.Dir(remote), ".afb-"+rand.Text()+".tmp")
+	journal := ""
+	if c.RecoveryDir != "" {
+		journal = filepath.Join(c.RecoveryDir, path.Base(temporary)+".journal")
+		if err := os.WriteFile(journal, []byte(temporary), 0o600); err != nil {
+			return 0, err
+		}
+	}
 	committed := false
 	defer func() {
-		if !committed {
-			_ = conn.Delete(temporary)
+		if committed {
+			if journal != "" {
+				_ = os.Remove(journal)
+			}
+			return
+		}
+		// The transfer connection can already be closed by cancellation or EOF.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cleanup, err := c.connect(cleanupCtx)
+		if err == nil {
+			err = cleanup.Delete(temporary)
+			_ = cleanup.Quit()
+		}
+		if err == nil {
+			if journal != "" {
+				_ = os.Remove(journal)
+			}
+		} else {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remote temporary cleanup pending: %w", err))
 		}
 	}()
 	err = conn.Stor(temporary, r)
@@ -226,6 +262,44 @@ func (c *Client) Check(ctx context.Context) error {
 	defer func() { _ = conn.Quit() }()
 	if _, err := conn.CurrentDir(); err != nil {
 		return wrap("pwd", err)
+	}
+	return nil
+}
+
+// A journal is written before STOR. The next upload reclaims only this route's
+// recorded names, including after process death or a failed cleanup connection.
+func (c *Client) recover(conn *ftp.ServerConn) error {
+	if c.RecoveryDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(c.RecoveryDir, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(c.RecoveryDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasPrefix(entry.Name(), ".afb-") || !strings.HasSuffix(entry.Name(), ".journal") {
+			continue
+		}
+		journal := filepath.Join(c.RecoveryDir, entry.Name())
+		remote, err := os.ReadFile(journal)
+		if err != nil {
+			return err
+		}
+		if path.Base(string(remote))+".journal" != entry.Name() {
+			return errors.New("invalid FTP recovery journal")
+		}
+		if err := conn.Delete(string(remote)); err != nil {
+			var te *textproto.Error
+			if !errors.As(err, &te) || te.Code != 550 {
+				return wrap("recover temporary", err)
+			}
+		}
+		if err := os.Remove(journal); err != nil {
+			return err
+		}
 	}
 	return nil
 }

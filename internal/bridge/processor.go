@@ -312,6 +312,11 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 		}
 	}
 	p.addDiagnostics(&pub, err)
+	// Adding delivery_mode consumes one byte even when all other properties
+	// are preserved. Do not enlarge an already full incoming header frame.
+	if d.DeliveryMode == 0 && p.frameBytes(&pub) > p.frameLimit() {
+		pub.DeliveryMode = 0
+	}
 	timeout := p.PublishTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second

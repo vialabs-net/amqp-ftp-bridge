@@ -33,6 +33,9 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 	done := make(chan error, 1)
 	go func() { done <- h.run(ctx) }()
 	status <- svc.Status{State: svc.Running, Accepts: accepted}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var checkpoint uint32
 	for {
 		select {
 		case err := <-done:
@@ -41,12 +44,18 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 				return true, 1
 			}
 			return false, 0
+		case <-ticker.C:
+			if checkpoint > 0 {
+				checkpoint++
+				status <- svc.Status{State: svc.StopPending, CheckPoint: checkpoint, WaitHint: 30000}
+			}
 		case c := <-req:
 			switch c.Cmd {
 			case svc.Interrogate:
 				status <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
-				status <- svc.Status{State: svc.StopPending, WaitHint: uint32((30 * time.Second).Milliseconds())}
+				checkpoint++
+				status <- svc.Status{State: svc.StopPending, CheckPoint: checkpoint, WaitHint: 30000}
 				cancel()
 			}
 		}
@@ -134,7 +143,9 @@ func Uninstall() error {
 		return fmt.Errorf("service %s is not installed", Name)
 	}
 	defer s.Close()
-	_, _ = s.Control(svc.Stop)
+	if err := stopAndWait(s); err != nil {
+		return err
+	}
 	if err := s.Delete(); err != nil {
 		return err
 	}
@@ -169,7 +180,23 @@ func Stop() error {
 		return fmt.Errorf("service %s is not installed", Name)
 	}
 	defer s.Close()
-	st, err := s.Control(svc.Stop)
+	return stopAndWait(s)
+}
+
+type stoppableService interface {
+	Query() (svc.Status, error)
+	Control(svc.Cmd) (svc.Status, error)
+}
+
+func stopAndWait(s stoppableService) error {
+	st, err := s.Query()
+	if err != nil {
+		return err
+	}
+	if st.State == svc.Stopped {
+		return nil
+	}
+	st, err = s.Control(svc.Stop)
 	if err != nil {
 		return err
 	}

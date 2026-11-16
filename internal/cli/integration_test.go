@@ -514,19 +514,25 @@ func TestIntegrationHappyPath(t *testing.T) {
 	}
 }
 
-type interruptedReader struct{}
+type cancelUploadReader struct{ cancel context.CancelFunc }
 
-func (interruptedReader) Read([]byte) (int, error) { return 0, fmt.Errorf("interrupted upload") }
+func (r cancelUploadReader) Read([]byte) (int, error) { r.cancel(); return 0, context.Canceled }
 
 func TestIntegrationInterruptedOverwrite(t *testing.T) {
 	_, address := env(t)
-	c := &ftpup.Client{Address: address, User: ftpUser, Password: ftpPass, Timeout: time.Second}
+	c := &ftpup.Client{Address: address, User: ftpUser, Password: ftpPass, Timeout: time.Second, RecoveryDir: t.TempDir()}
 	const name = "atomic-existing.txt"
 	if _, err := c.Upload(context.Background(), "", name, strings.NewReader("original")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Upload(context.Background(), "", name, io.MultiReader(strings.NewReader("partial"), interruptedReader{})); err == nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := c.Upload(ctx, "", name, io.MultiReader(strings.NewReader("partial"), cancelUploadReader{cancel})); err == nil {
 		t.Fatal("expected interrupted transfer")
+	}
+	entries, err := os.ReadDir(c.RecoveryDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("cancelled FTP upload left a cleanup journal", err)
 	}
 	if got := ftpRead(t, address, name); got != "original" {
 		t.Errorf("existing destination changed after failed transfer: %q", got)
@@ -849,6 +855,84 @@ func TestIntegrationLongQueue(t *testing.T) {
 	}
 	publish(t, conn, q, "long-1", "upload", "F-L", "long.txt", "long-queue")
 	waitStep(t, logDir, "long-1", audit.StepAcked)
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIntegrationFTPRecoveryJournal(t *testing.T) {
+	_, addr := env(t)
+	raw, err := ftp.Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Quit()
+	if err := raw.Login(ftpUser, ftpPass); err != nil {
+		t.Fatal(err)
+	}
+	remote := ".afb-abandoned.tmp"
+	if err := raw.Stor(remote, strings.NewReader("partial")); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, remote+".journal"), []byte(remote), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &ftpup.Client{Address: addr, User: ftpUser, Password: ftpPass, Timeout: time.Second, RecoveryDir: dir}
+	if _, err := client.Upload(context.Background(), "", "recovered.txt", strings.NewReader("new")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.FileSize(remote); err == nil {
+		t.Fatal("abandoned remote file remains")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("recovery journal remains", err)
+	}
+}
+
+func TestIntegrationDeadLetterFrameBoundary(t *testing.T) {
+	addr, ftpAddr := env(t)
+	src := newStub(t, nil)
+	q := uniq("frame.boundary")
+	conn := dial(t, addr)
+	declare(t, conn, q)
+	cfg, _ := writeTestConfig(t, addr, ftpAddr, src.URL, "", routeSpec{queue: q})
+	logs, stop := startBridge(t, cfg)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "consuming") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "consuming") {
+		t.Fatal("consumer did not start")
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	// 8 frame bytes + 14 fixed header bytes + 4 table bytes + 9 pad entry bytes.
+	pub := amqp.Publishing{Body: []byte("{"), Headers: amqp.Table{"pad": strings.Repeat("x", 131072-35)}}
+	if err := ch.PublishWithContext(context.Background(), "", q, false, false, pub); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		d, ok, err := ch.Get(q+"_deadLetter", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			if string(d.Body) != "{" || d.DeliveryMode != 0 {
+				t.Fatal("boundary message changed")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("dead-letter did not arrive")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}

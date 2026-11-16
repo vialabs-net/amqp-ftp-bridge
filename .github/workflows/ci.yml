@@ -134,6 +134,25 @@ jobs:
           finally:
               path.write_text(original)
 
+      - name: Windows stop lifecycle mutations must fail
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          path = Path("internal/winsvc/windows.go")
+          original = path.read_text()
+          cases = [("case <-ticker.C:", "case <-make(chan time.Time):", "TestStopPendingProgress"), ("for st.State != svc.Stopped {", "for false {", "TestStopWaitsAndPropagatesFailure")]
+          for old, new, test in cases:
+              assert original.count(old) == 1
+              try:
+                  path.write_text(original.replace(old, new))
+                  result = subprocess.run(["go", "test", "-p", "2", "-timeout", "30s", "./internal/winsvc", "-run", "^" + test + "$", "-count=1"], capture_output=True, text=True)
+                  print(result.stdout, result.stderr)
+                  if result.returncode == 0 or "--- FAIL: " + test not in result.stdout:
+                      raise RuntimeError("service lifecycle mutation not detected")
+              finally:
+                  path.write_text(original)
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest

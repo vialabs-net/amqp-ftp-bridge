@@ -2,11 +2,13 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/audit"
@@ -151,7 +153,7 @@ func build(cfg *config.Config, secrets map[string]creds.Credential, aw *audit.Wr
 				Mapping:            r.Mapping,
 				Match:              r.Match,
 				Downloader:         download.New(src.URLPrefix, sc.User, sc.Password, cfg.TempDir, src.Timeout),
-				Uploader:           &ftpup.Client{Address: tgt.Address, User: fc.User, Password: fc.Password, Timeout: tgt.Timeout},
+				Uploader:           &ftpup.Client{Address: tgt.Address, User: fc.User, Password: fc.Password, Timeout: tgt.Timeout, RecoveryDir: filepath.Join(cfg.TempDir, fmt.Sprintf("ftp-%x", sha256.Sum256([]byte(r.Queue+"\x00"+tgt.Address+"\x00"+fc.User))))},
 				TempDir:            cfg.TempDir,
 			},
 			Audit:            aw,
