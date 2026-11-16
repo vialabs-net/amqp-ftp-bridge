@@ -63,6 +63,8 @@ The service `amqp-ftp-bridge` ("AMQP FTP Bridge") starts automatically and resta
 
 `SERVICE_ACCOUNT`, `METRICS_ALLOW_FROM` and `METRICS_PORT` are stored in `HKLM\SOFTWARE\vialabs\amqp-ftp-bridge`. An upgrade that does not pass them uses the stored values.
 
+For a custom user or gMSA, provision the account on the machine and grant it [Log on as a service](https://learn.microsoft.com/en-us/windows/win32/msi/serviceinstall-table) before installing. The MSI does not create accounts or grant this right. A gMSA uses an empty `SERVICE_PASSWORD`.
+
 **Silent install**
 
 ```
@@ -219,7 +221,7 @@ It asks for the user and the password (without echo).
 
 | Platform | Storage |
 |---|---|
-| Windows | `<data_dir>\credentials\<name>.bin`, encrypted with DPAPI, machine scope. Directory and file ACL: SYSTEM and Administrators only. |
+| Windows | `<data_dir>\credentials\<name>.bin`, encrypted with DPAPI, machine scope. Directory and file ACL: SYSTEM and Administrators have full control; the service SID has read access. |
 | Other (development and tests only) | Environment variable `AFB_CRED_<NAME>=user:password`. `NAME` is upper case, other characters become `_`. |
 
 If a credential cannot be read, the service does not start. It writes the reason to stderr and the Event Log.
