@@ -33,12 +33,18 @@ func TestDPAPIStore(t *testing.T) {
 	if bytes.Contains(data, []byte(want.User)) || bytes.Contains(data, []byte(want.Password)) || json.Valid(data) {
 		t.Fatal("credential stored without encryption")
 	}
-	for _, path := range []string{filepath.Dir(path), path} {
+	for i, path := range []string{filepath.Dir(path), path} {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := sd.String(); got != "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" {
+		// Windows marks the DACL auto-inherited and drops propagation flags
+		// on files. Protection and the two permitted principals must remain.
+		want := "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+		if i == 0 {
+			want = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+		}
+		if got := strings.Replace(sd.String(), "D:PAI", "D:P", 1); got != want {
 			t.Errorf("unexpected credential ACL: %s", got)
 		}
 	}
