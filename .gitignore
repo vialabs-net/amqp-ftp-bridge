@@ -2,3 +2,4 @@ dist/
 *.exe
 *.msi
 coverage.out
+*.syso
