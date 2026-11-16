@@ -103,7 +103,7 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 	}
 	conn, err := c.connect(ctx)
 	if err != nil {
-		return 0, err
+		return codeOf(err), err
 	}
 	defer func() { _ = conn.Quit() }()
 
