@@ -14,3 +14,9 @@
 :rabbitmq\.com$
 :claude\.com$
 :hub\.docker\.com$
+# WiX schema namespaces and the public Microsoft timestamp server.
+^installer/.*\.wxs:wixtoolset\.org$
+:timestamp\.acs\.microsoft\.com$
+:learn\.microsoft\.com$
+:signpath\.io$
+:signpath\.org$

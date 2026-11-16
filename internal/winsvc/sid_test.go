@@ -1,6 +1,11 @@
 package winsvc
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestServiceSID(t *testing.T) {
 	// Well-known SID of NT SERVICE\TrustedInstaller.
@@ -12,5 +17,20 @@ func TestServiceSID(t *testing.T) {
 	}
 	if SID != ServiceSID(Name) {
 		t.Fatal("SID must match Name")
+	}
+}
+
+// The MSI grants directory access to the service SID it holds as a constant.
+func TestInstallerServiceSID(t *testing.T) {
+	wxs, err := os.ReadFile(filepath.Join("..", "..", "installer", "amqp-ftp-bridge.wxs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `<?define ServiceSid = "` + SID + `" ?>`
+	if !strings.Contains(string(wxs), want) {
+		t.Fatalf("installer must define %s", want)
+	}
+	if !strings.Contains(string(wxs), `<?define ServiceName = "`+Name+`" ?>`) {
+		t.Fatal("installer service name must match Name")
 	}
 }

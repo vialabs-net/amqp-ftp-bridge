@@ -1,0 +1,156 @@
+name: Release
+
+# A tag v1.2.3 (or v1.2.3-rc.1) builds the executable and the MSI, signs
+# them when signing is configured, and publishes a GitHub release with the
+# SHA-256 file, an SPDX SBOM and build provenance attestations.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WIX_VERSION: 5.0.2
+
+jobs:
+  build:
+    name: Build and sign
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      # Azure login with OpenID Connect for Artifact Signing.
+      id-token: write
+    env:
+      # Artifact Signing (formerly Trusted Signing) is configured with
+      # repository variables. Signing is skipped while AZURE_SIGNING_ACCOUNT is
+      # empty. See "Code signing" in the README.
+      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Version from the tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add --global "WixToolset.Firewall.wixext/$env:WIX_VERSION"
+
+      - name: Build executable
+        shell: bash
+        run: ./scripts/build-windows.sh "${{ steps.version.outputs.version }}" "${GITHUB_SHA::12}" dist/amqp-ftp-bridge.exe
+
+      - name: Azure login
+        if: env.AZURE_SIGNING_ACCOUNT != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign executable
+        if: env.AZURE_SIGNING_ACCOUNT != ''
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\amqp-ftp-bridge.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # The MSI embeds the executable, so the executable is signed first.
+      - name: Build MSI
+        run: ./installer/build.ps1 -Version "${{ steps.version.outputs.version }}" -Exe dist/amqp-ftp-bridge.exe -Out dist/amqp-ftp-bridge.msi
+
+      - name: Sign MSI
+        if: env.AZURE_SIGNING_ACCOUNT != ''
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\amqp-ftp-bridge.msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Check signatures
+        if: env.AZURE_SIGNING_ACCOUNT != ''
+        run: |
+          foreach ($f in 'dist/amqp-ftp-bridge.exe', 'dist/amqp-ftp-bridge.msi') {
+            $s = Get-AuthenticodeSignature $f
+            Write-Host "$f $($s.Status) $($s.SignerCertificate.Subject)"
+            if ($s.Status -ne 'Valid') { throw "$f is not validly signed" }
+          }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binaries
+          path: |
+            dist/amqp-ftp-bridge.exe
+            dist/amqp-ftp-bridge.msi
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: SBOM, checksums, attestations and release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-binaries
+          path: dist
+
+      # SPDX from the Go build information in the executable: the modules
+      # actually compiled in.
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          file: dist/amqp-ftp-bridge.exe
+          format: spdx-json
+          output-file: dist/amqp-ftp-bridge.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: SHA-256
+        working-directory: dist
+        run: sha256sum amqp-ftp-bridge.exe amqp-ftp-bridge.msi amqp-ftp-bridge.spdx.json > SHA256SUMS
+
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/amqp-ftp-bridge.exe
+            dist/amqp-ftp-bridge.msi
+            dist/amqp-ftp-bridge.spdx.json
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=()
+          if [[ $TAG == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" "${prerelease[@]}" \
+            dist/amqp-ftp-bridge.exe dist/amqp-ftp-bridge.msi dist/amqp-ftp-bridge.spdx.json dist/SHA256SUMS
