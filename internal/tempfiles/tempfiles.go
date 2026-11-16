@@ -14,6 +14,9 @@ func Acquire(dir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
+	if err := secureDir(dir); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(filepath.Join(dir, ".afb.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err

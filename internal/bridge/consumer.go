@@ -193,8 +193,9 @@ func (b *Bridge) setup(conn *amqp.Connection, p *Processor) (*amqp.Channel, <-ch
 	if err := ch.Confirm(false); err != nil {
 		return nil, nil, "", fmt.Errorf("enable confirms on %s: %w", q, err)
 	}
-	host, _ := os.Hostname()
-	tag := fmt.Sprintf("amqp-ftp-bridge@%s/%s", host, q)
+	// Generate a unique tag within AMQP's 255-byte limit,
+	// independently of queue and host name lengths.
+	tag := "afb-" + newUUID()
 	deliveries, err := ch.Consume(q, tag, false, false, false, false, nil)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("consume %s: %w", q, err)

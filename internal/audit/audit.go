@@ -231,9 +231,23 @@ func (w *Writer) appendLocked(day string, r Record) error {
 			_ = w.file.Close()
 			w.file = nil
 		}
-		f, err := os.OpenFile(filepath.Join(w.dir, "audit-"+day+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+		f, err := os.OpenFile(filepath.Join(w.dir, "audit-"+day+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o640)
 		if err != nil {
 			return fmt.Errorf("open audit file: %w", err)
+		}
+		// Separate a crash-truncated tail from the next complete record. Keep
+		// the partial bytes for inspection; readers already ignore invalid lines.
+		info, err := f.Stat()
+		if err == nil && info.Size() > 0 {
+			var last [1]byte
+			_, err = f.ReadAt(last[:], info.Size()-1)
+			if err == nil && last[0] != '\n' {
+				_, err = f.Write([]byte{'\n'})
+			}
+		}
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("repair audit tail: %w", err)
 		}
 		w.file, w.fileDay = f, day
 	}

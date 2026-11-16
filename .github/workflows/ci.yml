@@ -116,6 +116,24 @@ jobs:
               finally:
                   path.write_text(original)
 
+      - name: Temporary file ACL mutation must fail
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          path = Path("internal/tempfiles/lock_windows.go")
+          original = path.read_text()
+          old = "D:P(A;OICI;FA;;;SY)"
+          assert original.count(old) == 1
+          try:
+              path.write_text(original.replace(old, "D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)"))
+              result = subprocess.run(["go", "test", "-p", "2", "-timeout", "2m", "./internal/tempfiles", "-run", "^TestTemporaryFilesPrivate$", "-count=1"], capture_output=True, text=True)
+              print(result.stdout, result.stderr)
+              if result.returncode == 0 or "--- FAIL: TestTemporaryFilesPrivate" not in result.stdout:
+                  raise RuntimeError("public temporary ACL was not detected")
+          finally:
+              path.write_text(original)
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest

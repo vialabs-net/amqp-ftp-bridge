@@ -474,3 +474,32 @@ func TestRedact(t *testing.T) {
 		t.Error("invalid")
 	}
 }
+
+func TestDeadLetterTTLAtFrameLimit(t *testing.T) {
+	f := newFixture(t, nil)
+	f.dl.err = errors.New("download failed")
+	d := delivery(body)
+	d.Expiration = ""
+	d.Headers["padding"] = strings.Repeat("p", 3800)
+	f.handle(d)
+	baseline := f.ch.published[0]
+	delete(baseline.Headers, f.p.ErrorHeader)
+	delete(baseline.Headers, f.p.StacktraceHeader)
+	extra := 4096 - f.p.frameBytes(&baseline) - 5
+	if extra < 0 {
+		t.Fatal("invalid test fixture")
+	}
+	d.Headers["padding"] = strings.Repeat("p", 3800+extra)
+	d.Expiration = "1000"
+	f = newFixture(t, nil)
+	f.dl.err = errors.New("download failed")
+	f.p.MaxFrameBytes = 4096
+	f.handle(d)
+	pub := f.ch.published[0]
+	if _, ok := pub.Headers["x-original-expiration"]; ok {
+		t.Fatal("TTL metadata overflowed the frame")
+	}
+	if f.p.frameBytes(&pub) > 4096 || len(f.ch.acked) != 1 || string(pub.Body) != body {
+		t.Fatal("invalid dead-letter frame or lost message")
+	}
+}

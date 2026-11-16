@@ -286,9 +286,6 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 	}
 	delete(headers, p.ErrorHeader)
 	delete(headers, p.StacktraceHeader)
-	if d.Expiration != "" {
-		headers["x-original-expiration"] = d.Expiration
-	}
 	pub := amqp.Publishing{
 		Headers:         headers,
 		ContentType:     d.ContentType,
@@ -302,6 +299,17 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 		Type:            d.Type,
 		AppId:           d.AppId,
 		Body:            d.Body,
+	}
+	if d.Expiration != "" {
+		previous, exists := headers["x-original-expiration"]
+		headers["x-original-expiration"] = d.Expiration
+		if p.frameBytes(&pub) > p.frameLimit() {
+			if exists {
+				headers["x-original-expiration"] = previous
+			} else {
+				delete(headers, "x-original-expiration")
+			}
+		}
 	}
 	p.addDiagnostics(&pub, err)
 	timeout := p.PublishTimeout
@@ -348,16 +356,7 @@ func (p *Processor) fail(ctx context.Context, ch Channel, d amqp.Delivery, j *jo
 // Header frames cannot be split. Keep the original headers and use only the
 // remaining frame space for diagnostics, with a 2 KiB cap per diagnostic.
 func (p *Processor) addDiagnostics(pub *amqp.Publishing, err error) {
-	limit := p.MaxFrameBytes
-	if limit <= 0 {
-		limit = 128 * 1024
-	}
-	// 64 bytes cover frame, content header, flags and scalar properties.
-	used := 64 + fieldSize(pub.Headers)
-	for _, s := range []string{pub.ContentType, pub.ContentEncoding, pub.CorrelationId, pub.ReplyTo, pub.Expiration, pub.MessageId, pub.Type, pub.UserId, pub.AppId} {
-		used += len(s) + 1
-	}
-	available := limit - used - len(p.ErrorHeader) - len(p.StacktraceHeader) - 12
+	available := p.frameLimit() - p.frameBytes(pub) - len(p.ErrorHeader) - len(p.StacktraceHeader) - 12
 	if available < 0 {
 		return // Original headers leave no room for diagnostic fields.
 	}
@@ -368,6 +367,22 @@ func (p *Processor) addDiagnostics(pub *amqp.Publishing, err error) {
 		}
 		pub.Headers[key] = value
 	}
+}
+
+func (p *Processor) frameLimit() int {
+	if p.MaxFrameBytes > 0 {
+		return p.MaxFrameBytes
+	}
+	return 128 * 1024
+}
+
+func (p *Processor) frameBytes(pub *amqp.Publishing) int {
+	// Conservative bound for the frame, content header and scalar properties.
+	size := 64 + fieldSize(pub.Headers)
+	for _, s := range []string{pub.ContentType, pub.ContentEncoding, pub.CorrelationId, pub.ReplyTo, pub.Expiration, pub.MessageId, pub.Type, pub.UserId, pub.AppId} {
+		size += len(s) + 1
+	}
+	return size
 }
 
 // fieldSize conservatively bounds the AMQP field encoding, including its

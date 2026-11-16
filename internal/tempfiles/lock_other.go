@@ -8,3 +8,5 @@ import (
 )
 
 func lock(f *os.File) error { return unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB) }
+
+func secureDir(dir string) error { return os.Chmod(dir, 0o750) }

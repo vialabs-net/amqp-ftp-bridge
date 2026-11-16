@@ -203,3 +203,39 @@ func TestNextMidnightDST(t *testing.T) {
 		t.Errorf("next day starts at %v", next)
 	}
 }
+
+func TestRestartAfterPartialAuditLine(t *testing.T) {
+	for _, tail := range []string{`{"step":"received"`, `{"step":"received","msg_id":"old","queue":"q"}`} {
+		t.Run(tail, func(t *testing.T) {
+			dir := t.TempDir()
+			now := time.Date(2026, 3, 1, 12, 0, 0, 0, loc)
+			if err := os.WriteFile(filepath.Join(dir, FileName(now)), []byte(tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w, err := NewWriter(dir, "v", "host-a", WithClock(func() time.Time { return now }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Write(Record{Step: StepReceived, MsgID: "new", Queue: "q"}); err != nil {
+				t.Fatal(err)
+			}
+			w.Close()
+			var out bytes.Buffer
+			if _, err := Query(dir, Filter{Date: "2026-03-01"}, &out); err != nil || !strings.Contains(out.String(), `"msg_id":"new"`) {
+				t.Fatalf("new record lost: %s %v", out.String(), err)
+			}
+			w, err = NewWriter(dir, "v", "host-a", WithClock(func() time.Time { return now }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			want := int64(1)
+			if json.Valid([]byte(tail)) {
+				want = 2
+			}
+			if w.Totals()["q"].Received != want {
+				t.Fatal("restart totals lost valid records")
+			}
+		})
+	}
+}

@@ -831,3 +831,25 @@ func TestIntegrationCheck(t *testing.T) {
 		t.Errorf("queue line missing:\n%s", out)
 	}
 }
+
+func TestIntegrationLongQueue(t *testing.T) {
+	rabbitAddr, ftpAddr := env(t)
+	src := newStub(t, map[string]string{"F-L": "long queue"})
+	q := uniq(strings.Repeat("q", 220))
+	conn := dial(t, rabbitAddr)
+	declare(t, conn, q)
+	cfg, logDir := writeTestConfig(t, rabbitAddr, ftpAddr, src.URL, "", routeSpec{queue: q})
+	logs, stop := startBridge(t, cfg)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "consuming") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "consuming") {
+		t.Fatalf("long queue consumer did not start: %s", logs.String())
+	}
+	publish(t, conn, q, "long-1", "upload", "F-L", "long.txt", "long-queue")
+	waitStep(t, logDir, "long-1", audit.StepAcked)
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+}
