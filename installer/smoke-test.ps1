@@ -168,7 +168,11 @@ New-LocalUser -Name $user -Password (ConvertTo-SecureString $password -AsPlainTe
 try {
     $account = "$env:COMPUTERNAME\$user"
     Invoke-Msi @('/i', "`"$NewMsi`"", "SERVICE_ACCOUNT=$account", "SERVICE_PASSWORD=$password")
-    Check ((Get-CimInstance Win32_Service -Filter "Name='$name'").StartName -eq $account) 'custom account configured'
+    $configuredAccount = (Get-CimInstance Win32_Service -Filter "Name='$name'").StartName
+    # SCM may canonicalize COMPUTER\user to .\user. Compare the actual identity.
+    $lookupAccount = $configuredAccount -replace '^\.\\', "$env:COMPUTERNAME\"
+    $configuredSid = ([Security.Principal.NTAccount]$lookupAccount).Translate([Security.Principal.SecurityIdentifier]).Value
+    Check ($configuredSid -eq (Get-LocalUser -Name $user).SID.Value) "custom account configured (got $configuredAccount)"
     Check (Wait-Healthy) 'custom account without prior service-logon rights answers /healthz'
     Invoke-Msi @('/x', "`"$NewMsi`"")
 } finally {
