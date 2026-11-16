@@ -45,10 +45,7 @@ func TestTemporaryFilesPrivate(t *testing.T) {
 	revert := advapi.NewProc("RevertToSelf")
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	thread, err := windows.GetCurrentThread()
-	if err != nil {
-		t.Fatal(err)
-	}
+	thread := windows.CurrentThread()
 	ok, _, callErr := impersonate.Call(uintptr(thread))
 	if ok == 0 {
 		t.Fatal(callErr)
