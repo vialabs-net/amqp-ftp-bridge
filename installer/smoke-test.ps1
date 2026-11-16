@@ -7,10 +7,15 @@ param(
     [Parameter(Mandatory)][string]$OldMsi,
     [Parameter(Mandatory)][string]$NewMsi,
     [Parameter(Mandatory)][string]$NewVersion,
-    [string]$LogDir = $env:RUNNER_TEMP
+    [string]$LogDir = 'msi-logs'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+$OldMsi = (Resolve-Path $OldMsi).Path
+$NewMsi = (Resolve-Path $NewMsi).Path
+New-Item -ItemType Directory -Force $LogDir | Out-Null
+$LogDir = (Resolve-Path $LogDir).Path
 
 $name = 'amqp-ftp-bridge'
 $exe = Join-Path $env:ProgramFiles "$name\$name.exe"
@@ -66,6 +71,8 @@ function Wait-Healthy {
 }
 
 Check (-not (Get-Service $name -ErrorAction SilentlyContinue)) 'no service before the install'
+
+try {
 
 # 1. Fresh install without configuration: service registered, not started.
 Invoke-Msi @('/i', "`"$OldMsi`"")
@@ -132,3 +139,7 @@ Check (Test-Path "$data\config.yaml") 'configuration kept'
 Check (Test-Path "$data\credentials\rabbitmq.bin") 'credentials kept'
 Check (@(Get-ChildItem "$data\logs" -Filter 'service-*.log').Count -ge 1) 'logs kept'
 Write-Host 'MSI smoke test passed'
+} finally {
+    # Service logs next to the msiexec logs, for the CI artifact.
+    Copy-Item "$data\logs\*.log" $LogDir -ErrorAction SilentlyContinue
+}

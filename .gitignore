@@ -3,3 +3,4 @@ dist/
 *.msi
 coverage.out
 *.syso
+msi-logs/
