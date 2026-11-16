@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
 	"golang.org/x/sys/windows"
 )
 
@@ -39,10 +40,10 @@ func TestDPAPIStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Windows marks the DACL auto-inherited and drops propagation flags
-		// on files. Protection and the two permitted principals must remain.
-		want := "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+		// on files. Protection and the three permitted principals must remain.
+		want := "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + winsvc.SID + ")"
 		if i == 0 {
-			want = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+			want = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;" + winsvc.SID + ")"
 		}
 		if got := strings.Replace(sd.String(), "D:PAI", "D:P", 1); got != want {
 			t.Errorf("unexpected credential ACL: %s", got)

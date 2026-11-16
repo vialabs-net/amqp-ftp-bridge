@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -103,6 +104,9 @@ func Install(exePath, configPath string) error {
 		DisplayName: DisplayName,
 		Description: "Consumes RabbitMQ queues, downloads each referenced file over HTTP and uploads it by FTP.",
 		StartType:   mgr.StartAutomatic,
+		// The service SID in the process token grants access to the
+		// data directories under any service account.
+		SidType: windows.SERVICE_SID_TYPE_UNRESTRICTED,
 	}, "run", "--config", configPath)
 	if err != nil {
 		return err

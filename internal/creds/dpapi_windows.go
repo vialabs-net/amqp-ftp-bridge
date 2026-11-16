@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
 	"golang.org/x/sys/windows"
 )
 
-// aclSDDL grants full control to SYSTEM and Administrators only, with
-// inheritance cut from the parent and passed down to new files.
-const aclSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+// aclSDDL grants full control to SYSTEM and Administrators and read access
+// to the service SID (NT SERVICE\amqp-ftp-bridge), with inheritance cut
+// from the parent and passed down to new files. The service SID lets the
+// service read credentials when it runs under a virtual or other account.
+var aclSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;" + winsvc.SID + ")"
 
 // DPAPIStore keeps credentials encrypted with DPAPI, machine scope, in
 // <Dir>/<name>.bin.
@@ -51,7 +54,7 @@ func (s DPAPIStore) Get(name string) (Credential, error) {
 }
 
 // Set implements Store. It restricts the directory and the file to SYSTEM
-// and Administrators.
+// and Administrators, with read access for the service.
 func (s DPAPIStore) Set(name string, c Credential) error {
 	if err := ValidName(name); err != nil {
 		return err

@@ -3,12 +3,14 @@
 package tempfiles
 
 import (
-	"golang.org/x/sys/windows"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
+	"golang.org/x/sys/windows"
 )
 
 func TestTemporaryFilesPrivate(t *testing.T) {
@@ -29,17 +31,17 @@ func TestTemporaryFilesPrivate(t *testing.T) {
 		}
 		got := strings.Replace(sd.String(), "D:PAI", "D:P", 1)
 		if i == 0 {
-			if got != "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" {
+			if got != "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;"+winsvc.SID+")" {
 				t.Fatalf("directory ACL: %s", got)
 			}
 		} else {
 			normalized := strings.ReplaceAll(strings.ReplaceAll(got, "D:AI", "D:"), ";ID;", ";;")
-			if normalized != "D:(A;;FA;;;SY)(A;;FA;;;BA)" {
+			if normalized != "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;"+winsvc.SID+")" {
 				t.Fatalf("file ACL: %s", got)
 			}
 		}
 	}
-	// An anonymous impersonation token has neither permitted principal.
+	// An anonymous impersonation token has none of the permitted principals.
 	advapi := windows.NewLazySystemDLL("advapi32.dll")
 	impersonate := advapi.NewProc("ImpersonateAnonymousToken")
 	revert := advapi.NewProc("RevertToSelf")
