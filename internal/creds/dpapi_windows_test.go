@@ -71,3 +71,52 @@ func TestDPAPINoPlaintextFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestSecureLegacyCredentials(t *testing.T) {
+	dir := t.TempDir()
+	s := DPAPIStore{Dir: filepath.Join(dir, "credentials")}
+	want := Credential{User: "reader", Password: "legacy-test-password"}
+	if err := s.Set("legacy", want); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.Dir, "legacy.bin")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := legacy.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := Secure(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("ACL migration changed encrypted contents", err)
+	}
+	if got, err := s.Get("legacy"); err != nil || got != want {
+		t.Fatal("migrated credential is unreadable", err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + winsvc.SID + ")"
+	if got := strings.Replace(sd.String(), "D:PAI", "D:P", 1); got != expected {
+		t.Fatalf("legacy credential ACL: %s", got)
+	}
+	if err := Secure(filepath.Join(dir, "missing")); err != nil {
+		t.Fatal(err)
+	}
+}

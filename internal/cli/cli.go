@@ -31,7 +31,9 @@ Commands:
   service uninstall    remove the Windows service
   service start        start the Windows service
   service stop         stop the Windows service
+  service grant-logon  grant an existing --account the Windows service logon right
   creds set <name>     store a credential (prompts for user and password)
+  creds secure         migrate Windows credential ACLs (administrator only)
   check                test the connections to RabbitMQ, FTP and every source
   audit                print audit records (--date, --queue, --file, --result)
   version              print the version
@@ -42,16 +44,17 @@ Common flags:
 
 // Hooks replaced by tests.
 var (
-	newStore   = creds.Default
-	isService  = winsvc.IsService
-	runService = winsvc.RunService
-	openEvLog  = winsvc.OpenEventLog
-	svcInstall = winsvc.Install
-	svcRemove  = winsvc.Uninstall
-	svcStart   = winsvc.Start
-	svcStop    = winsvc.Stop
-	executable = os.Executable
-	notifyCtx  = func() (context.Context, context.CancelFunc) {
+	newStore    = creds.Default
+	secureCreds = creds.Secure
+	isService   = winsvc.IsService
+	runService  = winsvc.RunService
+	openEvLog   = winsvc.OpenEventLog
+	svcInstall  = winsvc.Install
+	svcRemove   = winsvc.Uninstall
+	svcStart    = winsvc.Start
+	svcStop     = winsvc.Stop
+	executable  = os.Executable
+	notifyCtx   = func() (context.Context, context.CancelFunc) {
 		return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	}
 	readPasswd  = term.ReadPassword
@@ -129,10 +132,16 @@ func cmdService(args []string, stdout, stderr io.Writer) error {
 		return errUsage
 	}
 	fs, cfgPath := newFlags("service "+args[0], stderr)
+	account := fs.String("account", "", "existing service account")
 	if err := parseFlags(fs, args[1:]); err != nil {
 		return err
 	}
 	switch args[0] {
+	case "grant-logon":
+		if *account == "" || fs.NArg() != 0 {
+			return errUsage
+		}
+		return winsvc.GrantServiceLogon(*account)
 	case "install":
 		abs, err := filepath.Abs(*cfgPath)
 		if err != nil {
@@ -171,13 +180,19 @@ func cmdService(args []string, stdout, stderr io.Writer) error {
 }
 
 func cmdCreds(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "set" {
+	if len(args) == 0 || (args[0] != "set" && args[0] != "secure") {
 		return errUsage
 	}
-	fs, cfgPath := newFlags("creds set", stderr)
+	fs, cfgPath := newFlags("creds "+args[0], stderr)
 	dataDir := fs.String("data-dir", "", "data directory (default: data_dir from the configuration)")
 	if err := parseFlags(fs, args[1:]); err != nil {
 		return err
+	}
+	if args[0] == "secure" {
+		if fs.NArg() != 0 || *dataDir == "" {
+			return errUsage
+		}
+		return secureCreds(*dataDir)
 	}
 	if fs.NArg() != 1 {
 		return errUsage

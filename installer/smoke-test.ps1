@@ -30,12 +30,12 @@ function Check($ok, $message) {
     Write-Host "ok: $message"
 }
 
-function Invoke-Msi([string[]]$arguments) {
+function Invoke-Msi([string[]]$arguments, [int[]]$allowedExitCodes = @(0, 3010)) {
     $script:step++
     $log = Join-Path $LogDir "msi-$script:step.log"
     $p = Start-Process msiexec.exe -ArgumentList ($arguments + @('/qn', '/norestart', '/l*v', "`"$log`"")) -Wait -PassThru
     Write-Host "msiexec $($arguments -join ' ') -> $($p.ExitCode)"
-    if ($p.ExitCode -notin 0, 3010) {
+    if ($p.ExitCode -notin $allowedExitCodes) {
         Get-Content $log -Tail 80 | Write-Host
         throw "msiexec failed with exit code $($p.ExitCode); log: $log"
     }
@@ -105,6 +105,26 @@ Check ($LASTEXITCODE -eq 0) 'creds set rabbitmq'
 Check ($LASTEXITCODE -eq 0) 'creds set ftp'
 Assert-PrivateAcl "$data\credentials\rabbitmq.bin"
 
+# A failed upgrade must roll back the removal of the working product.
+Invoke-Msi -arguments @('/i', "`"$NewMsi`"", 'SERVICE_ACCOUNT=.\AFBMissingSmokeAccount') -allowedExitCodes @(1603)
+$products = @(Get-Products)
+Check ($products.Count -eq 1 -and $products[0].DisplayVersion -ne $NewVersion) 'failed upgrade restored the old product'
+Check ((Get-CimInstance Win32_Service -Filter "Name='$name'").StartName -eq "NT SERVICE\$name") 'rollback restored the service account'
+Copy-Item $config "$data\config.yaml"
+Start-Service $name
+Check (Wait-Healthy) 'rolled-back service answers /healthz'
+Stop-Service $name
+(Get-Service $name).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
+
+# Simulate credentials written by the previous manual installer: each file
+# has its own protected SYSTEM/Administrators-only ACL. Folder ACLs cannot
+# migrate them through inheritance.
+foreach ($file in Get-ChildItem "$data\credentials" -Filter '*.bin') {
+    $acl = Get-Acl $file.FullName
+    $acl.SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)')
+    Set-Acl $file.FullName $acl
+}
+
 # 3. Major upgrade with CONFIG_FILE and METRICS_ALLOW_FROM: service starts.
 Invoke-Msi @('/i', "`"$NewMsi`"", "CONFIG_FILE=`"$config`"", "METRICS_ALLOW_FROM=$allowFrom")
 $products = @(Get-Products)
@@ -112,6 +132,7 @@ Check ($products.Count -eq 1) "one installed product after the upgrade (got $($p
 Check ($products[0].DisplayVersion -eq $NewVersion) "upgraded to $NewVersion (got $($products[0].DisplayVersion))"
 Check ((Get-Content "$data\config.yaml" -Raw) -eq (Get-Content $config -Raw)) 'CONFIG_FILE copied'
 Check (Test-Path "$data\credentials\rabbitmq.bin") 'credentials kept by the upgrade'
+Assert-PrivateAcl "$data\credentials\rabbitmq.bin"
 Check ((Get-CimInstance Win32_Service -Filter "Name='$name'").StartName -eq "NT SERVICE\$name") 'service account kept'
 (Get-Service $name).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
 Check (Wait-Healthy) 'service answers /healthz (configuration and credentials readable)'
@@ -138,6 +159,21 @@ Check (-not (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Applica
 Check (Test-Path "$data\config.yaml") 'configuration kept'
 Check (Test-Path "$data\credentials\rabbitmq.bin") 'credentials kept'
 Check (@(Get-ChildItem "$data\logs" -Filter 'service-*.log').Count -ge 1) 'logs kept'
+
+# A new local user has no service-logon right; the MSI must grant it.
+$user = 'AFBServiceSmoke'
+$password = [Guid]::NewGuid().ToString('N') + '!aA1'
+Write-Host "::add-mask::$password"
+New-LocalUser -Name $user -Password (ConvertTo-SecureString $password -AsPlainText -Force) | Out-Null
+try {
+    $account = "$env:COMPUTERNAME\$user"
+    Invoke-Msi @('/i', "`"$NewMsi`"", "SERVICE_ACCOUNT=$account", "SERVICE_PASSWORD=$password")
+    Check ((Get-CimInstance Win32_Service -Filter "Name='$name'").StartName -eq $account) 'custom account configured'
+    Check (Wait-Healthy) 'custom account without prior service-logon rights answers /healthz'
+    Invoke-Msi @('/x', "`"$NewMsi`"")
+} finally {
+    Remove-LocalUser -Name $user
+}
 Write-Host 'MSI smoke test passed'
 } finally {
     # Service logs next to the msiexec logs, for the CI artifact.

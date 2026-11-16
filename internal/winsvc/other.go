@@ -30,3 +30,6 @@ func Start() error { return ErrNotWindows }
 
 // Stop is only available on Windows.
 func Stop() error { return ErrNotWindows }
+
+// GrantServiceLogon is only available on Windows.
+func GrantServiceLogon(string) error { return ErrNotWindows }

@@ -63,7 +63,7 @@ The service `amqp-ftp-bridge` ("AMQP FTP Bridge") starts automatically and resta
 
 `SERVICE_ACCOUNT`, `METRICS_ALLOW_FROM` and `METRICS_PORT` are stored in `HKLM\SOFTWARE\vialabs\amqp-ftp-bridge`. An upgrade that does not pass them uses the stored values.
 
-For a custom user or gMSA, provision the account on the machine and grant it [Log on as a service](https://learn.microsoft.com/en-us/windows/win32/msi/serviceinstall-table) before installing. The MSI does not create accounts or grant this right. A gMSA uses an empty `SERVICE_PASSWORD`.
+For a custom user or gMSA, provision the account on the machine before installing. The MSI grants it [Log on as a service](https://learn.microsoft.com/en-us/windows/win32/msi/serviceinstall-table); domain policies that deny service logon still take precedence. The MSI does not create accounts. A gMSA uses an empty `SERVICE_PASSWORD`. The logon right is retained on uninstall because other services may use the account.
 
 **Silent install**
 
@@ -77,7 +77,7 @@ Store every credential the configuration names, then start the service. Until th
 
 **Upgrade**
 
-Install the new MSI the same way. The upgrade replaces the program and keeps the configuration, credentials and logs. With a user account, pass `SERVICE_PASSWORD` again.
+Install the new MSI the same way. The upgrade replaces the program and keeps the configuration, credentials and logs. It also grants the service SID read access to existing encrypted credentials without rewriting them. A failed upgrade rolls back the product replacement. With a user account, pass `SERVICE_PASSWORD` again; after a rollback, you may need to restore the service password in Services because Windows Installer cannot retrieve it.
 
 **Uninstall**
 
@@ -239,6 +239,7 @@ amqp-ftp-bridge <command> [--config <path>]
 | `service uninstall` | Stop and remove the service |
 | `service start` / `service stop` | Start or stop the service |
 | `creds set <name>` | Store a credential. `--data-dir` overrides `data_dir`. |
+| `creds secure --data-dir <path>` | Migrate existing Windows credential ACLs to allow the service SID to read them. Requires an administrator; run automatically by the MSI. |
 | `check` | Connect to RabbitMQ and check each queue exists (passive), log in to each FTP target, request each source prefix (HEAD, then GET). Consumes nothing. Exit code 1 if any check fails. |
 | `audit` | Print the records of matching messages. Flags: `--date YYYY-MM-DD` (default today), `--queue`, `--file` (glob on the file name), `--result` (`acked`, `dead_lettered`, `incomplete`), `--log-dir`. |
 | `version` | Print version and commit |
@@ -285,7 +286,7 @@ Releases are unsigned until signing is configured. The workflow signs the exe, b
 **Azure Artifact Signing** (formerly Trusted Signing). Implemented. Runs when the repository variable `AZURE_SIGNING_ACCOUNT` is set.
 
 1. Create an Artifact Signing account, complete identity validation and create a public-trust certificate profile.
-2. Create an Entra app registration with a federated credential for this repository, entity type "Tag", pattern `v*`. Give it the role "Artifact Signing Certificate Profile Signer" on the profile.
+2. Create an Entra app registration with a [flexible federated credential](https://learn.microsoft.com/en-us/entra/workload-id/workload-identities-set-up-flexible-federated-identity-credential) for this repository. Use issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange` and `claimsMatchingExpression` with `languageVersion: 1` and value `claims['sub'] matches 'repo:vialabs-net/amqp-ftp-bridge:ref:refs/tags:v*' and claims['repository_id'] eq '<REPOSITORY_ID>'`. Get the numeric ID with `gh api repos/vialabs-net/amqp-ftp-bridge --jq .id`; leave `subject` unset. Standard "Tag" credentials match one exact tag and do not support wildcards. Give the app the role "Artifact Signing Certificate Profile Signer" on the profile.
 3. Set these repository variables. No secret is needed: login uses OpenID Connect.
 
 | Variable | Value |
