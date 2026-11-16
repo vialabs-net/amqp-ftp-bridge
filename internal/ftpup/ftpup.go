@@ -161,7 +161,7 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 			_ = conn.Delete(temporary)
 		}
 	}()
-	err = conn.Stor(remote, r)
+	err = conn.Stor(temporary, r)
 	if err != nil {
 		e := wrap("stor "+remote, err)
 		return codeOf(e), e
