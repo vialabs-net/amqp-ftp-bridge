@@ -1,0 +1,103 @@
+# amqp-ftp-bridge configuration example. Every value is fictional.
+# Secrets never go in this file: fields named "credential" refer to a
+# credential stored with `amqp-ftp-bridge creds set <name>`.
+
+# Directory for credentials, temp files and logs.
+# Default: %ProgramData%\amqp-ftp-bridge on Windows.
+data_dir: 'C:\ProgramData\amqp-ftp-bridge'
+
+# Audit and service logs. Default: <data_dir>\logs.
+log_dir: 'C:\ProgramData\amqp-ftp-bridge\logs'
+
+# Downloads are written here before the upload. Default: <data_dir>\tmp.
+temp_dir: 'C:\ProgramData\amqp-ftp-bridge\tmp'
+
+# Time allowed for the in-flight messages to finish on stop. Default: 5m.
+shutdown_timeout: 5m
+
+audit:
+  # Audit and service log files older than this are deleted. Default: 365.
+  retention_days: 365
+
+amqp:
+  # amqp:// or amqps://, with the virtual host as the path. No user or
+  # password here.
+  url: amqps://rabbitmq.example.internal:5671/files
+  # Credential with the RabbitMQ user and password.
+  credential: rabbitmq
+  # AMQP heartbeat. Default: 10s.
+  heartbeat: 10s
+  # Longest wait between reconnection attempts. Default: 60s.
+  reconnect_max: 60s
+
+dead_letter:
+  # Failed messages go to the exchange <queue><exchange_suffix> with routing
+  # key <queue><routing_key_suffix>. Defaults: _deadLetter.
+  exchange_suffix: _deadLetter
+  routing_key_suffix: _deadLetter
+  # Header with the error message. Default: x-error.
+  error_header: x-error
+  # Header with the failed step and the error chain. Default: x-error-stacktrace.
+  stacktrace_header: x-error-stacktrace
+  # Declare the dead-letter exchange (direct, durable), a durable queue named
+  # after the routing key, and the binding. Default: true.
+  declare: true
+
+metrics:
+  # Prometheus /metrics, /healthz and /readyz. Empty (default) = disabled.
+  listen: "0.0.0.0:9464"
+
+# HTTP sources. A file is downloaded with GET <url_prefix><source_id>.
+sources:
+  - name: files-api
+    url_prefix: https://files.example.com/api/files/
+    # Credential for HTTP Basic authentication. Optional.
+    credential: files-api
+    # Timeout for the whole download. Default: 5m.
+    timeout: 5m
+
+# FTP targets. Passive mode, binary type.
+ftp:
+  - name: main
+    address: ftp.example.internal:21
+    credential: ftp
+    # Timeout for each FTP operation. Default: 1m.
+    timeout: 1m
+
+# One route per queue. The queue must already exist: it is not declared.
+routes:
+  - queue: files.upload
+    source: files-api
+    target: main
+    # Where each value comes from:
+    #   data._file.id      JSON path in the body (numbers index arrays: items.0.id)
+    #   header:Name        AMQP header
+    #   literal:text       fixed value
+    mapping:
+      source_id: data._file.id
+      folder: header:DestinationPath
+      file_name: data._file.name
+    # Optional. Process the message only when field equals the value.
+    match:
+      field: event
+      equals: upload
+      # dead_letter (default): unmatched messages go to the dead-letter exchange.
+      # upload_field: upload the JSON of upload_field as the file instead.
+      otherwise: dead_letter
+
+  - queue: files.legacy
+    source: files-api
+    target: main
+    mapping:
+      source_id: data.id
+      folder: literal:legacy/incoming
+      file_name: data.name
+    match:
+      field: event
+      equals: upload
+      otherwise: upload_field
+      upload_field: data
+    # Optional per-route override of the dead-letter exchange and routing key.
+    dead_letter:
+      exchange: files.legacy_deadLetter
+      routing_key: files.legacy_deadLetter

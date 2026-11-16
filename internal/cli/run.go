@@ -23,7 +23,7 @@ import (
 
 func cmdRun(args []string, stderr io.Writer) error {
 	fs, cfgPath := newFlags("run", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	elog := openEvLog()

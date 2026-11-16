@@ -57,6 +57,7 @@ var (
 	readPasswd  = term.ReadPassword
 	isTerminal  = term.IsTerminal
 	errUsage    = errors.New("usage")
+	errBadFlag  = errors.New("bad flag")
 	errReported = errors.New("reported")
 )
 
@@ -69,7 +70,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case errors.Is(err, errUsage):
 		fmt.Fprintf(stderr, usage, config.DefaultPath())
 		return 2
-	case errors.Is(err, flag.ErrHelp):
+	case errors.Is(err, flag.ErrHelp), errors.Is(err, errBadFlag):
 		return 2
 	case errors.Is(err, errReported):
 		return 1
@@ -112,12 +113,23 @@ func newFlags(name string, stderr io.Writer) (*flag.FlagSet, *string) {
 	return fs, cfg
 }
 
+// parseFlags parses args; the flag package has already printed any error.
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return errBadFlag
+	}
+	return nil
+}
+
 func cmdService(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errUsage
 	}
 	fs, cfgPath := newFlags("service "+args[0], stderr)
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := parseFlags(fs, args[1:]); err != nil {
 		return err
 	}
 	switch args[0] {
@@ -164,7 +176,7 @@ func cmdCreds(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	fs, cfgPath := newFlags("creds set", stderr)
 	dataDir := fs.String("data-dir", "", "data directory (default: data_dir from the configuration)")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := parseFlags(fs, args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -225,7 +237,7 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&f.Queue, "queue", "", "queue name")
 	fs.StringVar(&f.File, "file", "", "file name pattern, for example '*.pdf'")
 	fs.StringVar(&f.Result, "result", "", "acked, dead_lettered or incomplete")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	dir := *logDir

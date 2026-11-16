@@ -21,7 +21,7 @@ import (
 func cmdCheck(args []string, stdout, stderr io.Writer) error {
 	fs, cfgPath := newFlags("check", stderr)
 	timeout := fs.Duration("timeout", 30*time.Second, "timeout for each check")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	cfg, err := config.Load(*cfgPath)
