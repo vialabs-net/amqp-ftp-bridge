@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -54,7 +55,9 @@ var (
 	svcStart    = winsvc.Start
 	svcStop     = winsvc.Stop
 	executable  = os.Executable
-	notifyCtx   = func() (context.Context, context.CancelFunc) {
+	// ftpDial, when set, opens the FTP connections of HTTP routes.
+	ftpDial   func(ctx context.Context, network, address string) (net.Conn, error)
+	notifyCtx = func() (context.Context, context.CancelFunc) {
 		return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	}
 	readPasswd  = term.ReadPassword

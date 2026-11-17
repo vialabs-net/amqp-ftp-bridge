@@ -31,7 +31,10 @@ type Client struct {
 	Timeout  time.Duration
 	// RecoveryDir is private to one route, under the service's locked temp dir.
 	RecoveryDir string
-	mu          sync.Mutex
+	// Dial, when set, opens the control and data connections instead of
+	// net.Dialer. Tests use it to count sessions.
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
+	mu   sync.Mutex
 }
 
 // Error is a failed FTP operation with the server reply code, if any.
@@ -95,8 +98,17 @@ func (c *Client) connect(ctx context.Context) (*ftp.ServerConn, error) {
 	// The library's DialWithTimeout only bounds the TCP connection. Apply
 	// deadlines and cancellation to both control and passive data sockets.
 	dial := func(network, address string) (net.Conn, error) {
-		d := net.Dialer{Timeout: c.Timeout}
-		raw, err := d.DialContext(ctx, network, address)
+		dialCtx := ctx
+		if c.Timeout > 0 {
+			var cancel context.CancelFunc
+			dialCtx, cancel = context.WithTimeout(ctx, c.Timeout)
+			defer cancel()
+		}
+		dialer := c.Dial
+		if dialer == nil {
+			dialer = (&net.Dialer{}).DialContext
+		}
+		raw, err := dialer(dialCtx, network, address)
 		if err != nil {
 			return nil, err
 		}

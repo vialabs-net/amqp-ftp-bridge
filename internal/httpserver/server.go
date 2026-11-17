@@ -125,6 +125,8 @@ type Server struct {
 	// NewFTP returns the client for one request. slot identifies the FTP
 	// session, which no other request uses meanwhile. Default: ftpup.
 	NewFTP func(t Target, slot int) FTPClient
+	// DialFTP, when set, opens the FTP connections of the default NewFTP.
+	DialFTP func(ctx context.Context, network, address string) (net.Conn, error)
 
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
@@ -147,11 +149,11 @@ func (s *Server) obs() Observer {
 
 // DefaultFTP returns an ftpup client whose recovery journal is private to
 // the session slot, under tempDir.
-func DefaultFTP(tempDir string) func(Target, int) FTPClient {
+func DefaultFTP(tempDir string, dial func(context.Context, string, string) (net.Conn, error)) func(Target, int) FTPClient {
 	return func(t Target, slot int) FTPClient {
 		key := sha256.Sum256([]byte(fmt.Sprintf("http\x00%s\x00%s\x00%d", t.Address, t.User, slot)))
 		return ftpAdapter{&ftpup.Client{
-			Address: t.Address, User: t.User, Password: t.Password, Timeout: t.Timeout,
+			Address: t.Address, User: t.User, Password: t.Password, Timeout: t.Timeout, Dial: dial,
 			RecoveryDir: filepath.Join(tempDir, "ftp-http-"+hex.EncodeToString(key[:8])),
 		}}
 	}
@@ -184,7 +186,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, grace time.Duration
 	defer cancelHard()
 	s.hard = hard
 	if s.NewFTP == nil {
-		s.NewFTP = DefaultFTP(s.TempDir)
+		s.NewFTP = DefaultFTP(s.TempDir, s.DialFTP)
 	}
 	if s.Sessions == nil {
 		s.Sessions = NewSessions(1, s.Obs)

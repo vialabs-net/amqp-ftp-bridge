@@ -182,6 +182,7 @@ func buildHTTP(cfg *config.Config, secrets map[string]creds.Credential, aw *audi
 		ReadTimeout:       h.ReadTimeout,
 		WriteTimeout:      h.WriteTimeout,
 		IdleTimeout:       h.IdleTimeout,
+		DialFTP:           ftpDial,
 	}
 	for _, name := range h.Credentials {
 		s.Users = append(s.Users, secrets[name])

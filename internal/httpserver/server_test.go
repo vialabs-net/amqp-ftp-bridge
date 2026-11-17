@@ -659,7 +659,7 @@ func TestServeListenerError(t *testing.T) {
 
 func TestDefaultFTP(t *testing.T) {
 	dir := t.TempDir()
-	newFTP := DefaultFTP(dir)
+	newFTP := DefaultFTP(dir, nil)
 	a := newFTP(Target{Address: "127.0.0.1:1", User: "u"}, 0).(ftpAdapter)
 	b := newFTP(Target{Address: "127.0.0.1:1", User: "u"}, 1).(ftpAdapter)
 	if a.c.RecoveryDir == b.c.RecoveryDir || !strings.HasPrefix(a.c.RecoveryDir, dir) {
