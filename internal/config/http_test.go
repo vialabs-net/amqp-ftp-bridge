@@ -88,6 +88,7 @@ func TestHTTPValidate(t *testing.T) {
 		"creds without":  {"      ftp_credential_by: path:disk\n", "", "ftp_credentials needs ftp_credential_by"},
 		"by without":     {"ftp_credentials: { L: ftp-disk-l, M: ftp-disk-m }", "", "ftp_credentials is required"},
 		"empty cred":     {"M: ftp-disk-m", `M: ""`, "empty value or credential name"},
+		"ambiguous":      {"M: ftp-disk-m", "l: ftp-disk-m", "ftp_credentials: ambiguous keys"},
 		"unknown key":    {"  routes:\n", "  routes: []\n  unused:\n", "field unused not found"},
 	}
 	for name, tc := range cases {

@@ -33,8 +33,10 @@ type fakeFTP struct {
 	block   chan struct{}
 	started chan struct{}
 	// truncate makes downloads fail after this many bytes.
-	truncate int
-	sizeless bool
+	truncate      int
+	sizeless      bool
+	sizeOffset    int64
+	downloadBlock bool
 }
 
 func (f *fakeFTP) setErr(err error) { f.mu.Lock(); f.err = err; f.mu.Unlock() }
@@ -88,6 +90,10 @@ func (s *fakeSession) Upload(ctx context.Context, folder, name string, r io.Read
 }
 
 func (s *fakeSession) Download(ctx context.Context, folder, name string) (Transfer, error) {
+	if s.f.downloadBlock {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if err := s.f.getErr(); err != nil {
 		return nil, err
 	}
@@ -99,7 +105,7 @@ func (s *fakeSession) Download(ctx context.Context, folder, name string) (Transf
 	if !ok {
 		return nil, &ftpup.Error{Op: "retr " + p, Code: 550, Err: errors.New("550 not found")}
 	}
-	size := int64(len(body))
+	size := int64(len(body)) + s.f.sizeOffset
 	if sizeless {
 		size = -1
 	}
@@ -113,6 +119,19 @@ func (s *fakeSession) Download(ctx context.Context, folder, name string) (Transf
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("data connection reset") }
+
+type cancelEOFReader struct {
+	io.Reader
+	cancel context.CancelFunc
+}
+
+func (r cancelEOFReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err == io.EOF {
+		r.cancel()
+	}
+	return n, err
+}
 
 type fakeTransfer struct {
 	io.Reader
@@ -452,6 +471,93 @@ func TestDownloadInterrupted(t *testing.T) {
 	}
 	if r := f.audit.find("cut-1", audit.StepFailed); r.FailedStep != StepTransfer || *r.Bytes != 10 {
 		t.Errorf("failed = %+v", r)
+	}
+}
+
+func TestDownloadChangedSize(t *testing.T) {
+	for _, offset := range []int64{-3072, 3072} {
+		f := newFixture(t)
+		body := strings.Repeat("x", 4096)
+		f.ftp.files["disk-l:/a/file.bin"] = body
+		f.ftp.sizeOffset = offset
+		req, _ := http.NewRequest("GET", f.ts.URL+"/api/file/L:/a/file.bin", nil)
+		req.SetBasicAuth("client", "secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || string(got) != body {
+			t.Errorf("stale SIZE offset %d: received %d bytes, err %v", offset, len(got), err)
+		}
+	}
+}
+
+func TestBufferedUploadWaitSurvivesDisconnect(t *testing.T) {
+	f := newFixture(t)
+	f.srv.Sessions = NewSessions(1, f.obs)
+	_, release, err := f.srv.Sessions.Acquire(context.Background(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	f.srv.FTPWait = time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("POST", "/api/upload/", cancelEOFReader{strings.NewReader("received body"), cancel}).WithContext(ctx)
+	req.SetBasicAuth("client", "secret")
+	req.Header.Set("X-Folder", "a")
+	req.Header.Set("X-File-Name", "b")
+	timer := time.AfterFunc(50*time.Millisecond, release)
+	defer timer.Stop()
+	w := httptest.NewRecorder()
+	f.srv.ServeHTTP(w, req)
+	if w.Code != 200 || f.ftp.get("default:a/b") != "received body" {
+		t.Errorf("buffered upload = %d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestDownloadDeadlineReleasesSession(t *testing.T) {
+	f := newFixture(t)
+	f.ftp.downloadBlock = true
+	f.srv.WriteTimeout = 30 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/file/L:/a/b", nil).WithContext(ctx)
+	req.SetBasicAuth("client", "secret")
+	w := httptest.NewRecorder()
+	start := time.Now()
+	f.srv.ServeHTTP(w, req)
+	if w.Code != 502 || time.Since(start) > 500*time.Millisecond {
+		t.Errorf("blocked download = %d after %v", w.Code, time.Since(start))
+	}
+	if _, inUse, _, _, _ := f.obs.snapshot(); inUse != 0 {
+		t.Errorf("sessions still in use: %d", inUse)
+	}
+}
+
+func TestUploadCapacityBeforeBuffering(t *testing.T) {
+	f := newFixture(t)
+	f.srv.uploadsOnce.Do(func() { f.srv.uploads = NewSessions(1, nil) })
+	_, release, err := f.srv.uploads.Acquire(context.Background(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	req := httptest.NewRequest("POST", "/api/upload/", errReader{})
+	req.SetBasicAuth("client", "secret")
+	req.Header.Set("X-Folder", "a")
+	req.Header.Set("X-File-Name", "b")
+	w := httptest.NewRecorder()
+	f.srv.ServeHTTP(w, req)
+	if w.Code != 503 || w.Header().Get("Retry-After") == "" {
+		t.Errorf("upload capacity = %d", w.Code)
+	}
+	release()
+	resp, _ := f.do(t, "POST", "/api/upload/", strings.NewReader("accepted"), map[string]string{"X-Folder": "a", "X-File-Name": "b"})
+	if resp.StatusCode != 200 {
+		t.Errorf("released upload capacity = %d", resp.StatusCode)
 	}
 }
 

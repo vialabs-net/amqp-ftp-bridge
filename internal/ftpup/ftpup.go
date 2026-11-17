@@ -167,7 +167,11 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 	if err != nil {
 		return codeOf(err), err
 	}
-	defer func() { _ = conn.Quit() }()
+	defer func() {
+		if conn != nil {
+			_ = conn.Quit()
+		}
+	}()
 	if err := c.recover(conn); err != nil {
 		return 0, err
 	}
@@ -194,6 +198,9 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 			return
 		}
 		// The transfer connection can already be closed by cancellation or EOF.
+		// Close it before reconnecting so cleanup still consumes just one session.
+		_ = conn.Quit()
+		conn = nil
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		cleanup, err := c.connect(cleanupCtx)

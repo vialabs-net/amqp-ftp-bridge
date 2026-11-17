@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/audit"
+	"github.com/vialabs-net/amqp-ftp-bridge/internal/config"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/creds"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/winsvc"
 )
@@ -434,6 +435,13 @@ func TestRunHTTPOnly(t *testing.T) {
 	a, _ := os.ReadFile(filepath.Join(dir, "logs", audit.FileName(time.Now())))
 	if !strings.Contains(string(a), `"route":"upload"`) || !strings.Contains(string(a), `"http_status":401`) {
 		t.Errorf("audit:\n%s", a)
+	}
+}
+
+func TestBuildHTTPMissingCredential(t *testing.T) {
+	cfg := &config.Config{HTTP: config.HTTP{Credentials: []string{"missing"}}}
+	if _, err := buildHTTP(cfg, nil, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "http credential") {
+		t.Errorf("missing HTTP credential must fail closed: %v", err)
 	}
 }
 

@@ -108,7 +108,7 @@ http:
 | `{name}` | One or more characters inside one segment. It can share a segment with literal text: `{disk}:`. |
 | `{name...}` | Any text across `/`. It can be empty or start with `/`. |
 
-Two values must be separated by literal text. Values are URL-decoded. An encoded `/` (`%2F`) stays inside its segment.
+Two values must be separated by literal text. Values are URL-decoded. An encoded `/` (`%2F`) stays inside its segment. FTP credential keys must be distinct when compared case-insensitively.
 
 | Pattern | Path | Values |
 |---|---|---|
@@ -127,9 +127,11 @@ A folder or file name with a `..` segment or a NUL, or a file name with `/` or `
 
 A client that disconnects after sending its body does not stop the FTP upload.
 
+At most twice `max_ftp_sessions` uploads can receive or retain temporary bodies at once. Further uploads wait up to `ftp_wait` before receiving their body, then get 503 with `Retry-After` if capacity is still full. This bounds buffered disk contents to twice `max_ftp_sessions` times `max_upload_bytes`.
+
 **Download**
 
-The service takes an FTP session and streams `RETR` to the response, with `Content-Type: application/octet-stream`. `Content-Length` is set when the server answers `SIZE`. The session is freed when the stream ends or the client disconnects. If the FTP transfer breaks after the response started, the connection is aborted, so the client sees an error and not a short file.
+The service takes an FTP session and streams `RETR` to the response, with `Content-Type: application/octet-stream`. It does not advertise the earlier FTP `SIZE`: a concurrent upload can replace that file before `RETR`. HTTP frames the bytes actually transferred. The session is freed when the stream ends, the client disconnects or `write_timeout` expires. If the FTP transfer breaks after the response started, the connection is aborted, so the client sees an error and not a short file.
 
 **Status codes**
 
@@ -142,7 +144,7 @@ The service takes an FTP session and streams `RETR` to the response, with `Conte
 | 405 | Path matches a route with another method. Has `Allow`. |
 | 413 | Body larger than `max_upload_bytes` |
 | 502 | FTP connect, login or transfer failed |
-| 503 | No FTP session free within `ftp_wait`. Has `Retry-After`. |
+| 503 | No upload capacity or FTP session free within `ftp_wait`. Has `Retry-After`. |
 
 Error bodies are one line of plain text, such as `FTP login failed (530)`. They never hold paths, credentials or file contents. HTTP requests have no dead-letter: the caller gets the error.
 

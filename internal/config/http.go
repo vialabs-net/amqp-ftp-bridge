@@ -236,10 +236,17 @@ func (r HTTPRoute) validate(i int, names, targets map[string]bool) []error {
 	} else if len(r.FTPCredentials) > 0 {
 		add("ftp_credentials needs ftp_credential_by")
 	}
+	var credentialKeys []string
 	for key, name := range r.FTPCredentials {
 		if key == "" || name == "" {
 			add("ftp_credentials: empty value or credential name")
 		}
+		for _, previous := range credentialKeys {
+			if strings.EqualFold(previous, key) {
+				add("ftp_credentials: ambiguous keys %q and %q", previous, key)
+			}
+		}
+		credentialKeys = append(credentialKeys, key)
 	}
 	for field, sel := range selectors {
 		if err := validSelector(sel, pattern); err != nil {

@@ -185,7 +185,11 @@ func buildHTTP(cfg *config.Config, secrets map[string]creds.Credential, aw *audi
 		DialFTP:           ftpDial,
 	}
 	for _, name := range h.Credentials {
-		s.Users = append(s.Users, secrets[name])
+		credential, ok := secrets[name]
+		if !ok {
+			return nil, fmt.Errorf("http credential %q is missing", name)
+		}
+		s.Users = append(s.Users, credential)
 	}
 	for _, p := range h.TrustedProxies {
 		prefix, err := config.ParseTrustedProxy(p)

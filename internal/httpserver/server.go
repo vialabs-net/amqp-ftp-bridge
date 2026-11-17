@@ -136,8 +136,10 @@ type Server struct {
 	// hard is cancelled when the shutdown grace period ends. Uploads use it
 	// instead of the request context, so that a client that goes away after
 	// sending its body does not interrupt the FTP transfer.
-	hard     context.Context
-	handlers sync.WaitGroup
+	hard        context.Context
+	handlers    sync.WaitGroup
+	uploadsOnce sync.Once
+	uploads     *Sessions
 }
 
 func (s *Server) obs() Observer {
@@ -428,8 +430,8 @@ func (s *Server) ftpFailure(x *exchange, step string, err error) {
 }
 
 // acquire takes an FTP session or answers 503.
-func (s *Server) acquire(x *exchange) (int, func(), bool) {
-	slot, release, err := s.Sessions.Acquire(x.r.Context(), s.FTPWait)
+func (s *Server) acquire(x *exchange, ctx context.Context) (int, func(), bool) {
+	slot, release, err := s.Sessions.Acquire(ctx, s.FTPWait)
 	if err != nil {
 		if errors.Is(err, ErrBusy) {
 			x.w.Header().Set("Retry-After", strconv.Itoa(max(1, int(s.FTPWait.Seconds()))))
@@ -445,6 +447,16 @@ func (s *Server) upload(x *exchange) {
 		s.fail(x, http.StatusRequestEntityTooLarge, StepBody, fmt.Errorf("declared %d bytes, limit %d", x.r.ContentLength, s.MaxUploadBytes), 0, "upload too large")
 		return
 	}
+	// Bound disk usage independently of FTP sessions, including bodies being
+	// received and complete bodies waiting for FTP. Slow clients hold no FTP slot.
+	s.uploadsOnce.Do(func() { s.uploads = NewSessions(2*s.Sessions.Size(), nil) })
+	_, releaseUpload, err := s.uploads.Acquire(x.r.Context(), s.FTPWait)
+	if err != nil {
+		x.w.Header().Set("Retry-After", strconv.Itoa(max(1, int(s.FTPWait.Seconds()))))
+		s.fail(x, http.StatusServiceUnavailable, StepBody, err, 0, "no upload capacity available, retry later")
+		return
+	}
+	defer releaseUpload()
 	// Buffer to disk first, so that a slow client never holds an FTP session.
 	f, sum, n, err := s.buffer(x)
 	if f != nil {
@@ -462,7 +474,7 @@ func (s *Server) upload(x *exchange) {
 		}
 		return
 	}
-	slot, release, ok := s.acquire(x)
+	slot, release, ok := s.acquire(x, s.hardCtx())
 	if !ok {
 		return
 	}
@@ -503,13 +515,19 @@ func (s *Server) buffer(x *exchange) (*os.File, string, int64, error) {
 }
 
 func (s *Server) download(x *exchange) {
-	slot, release, ok := s.acquire(x)
+	ctx := x.r.Context()
+	if s.WriteTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.WriteTimeout)
+		defer cancel()
+	}
+	slot, release, ok := s.acquire(x, ctx)
 	if !ok {
 		return
 	}
 	defer release()
 	start := time.Now()
-	t, err := s.NewFTP(x.target, slot).Download(x.r.Context(), x.folder, x.fileName)
+	t, err := s.NewFTP(x.target, slot).Download(ctx, x.folder, x.fileName)
 	if err != nil {
 		s.ftpFailure(x, StepDownload, err)
 		return
@@ -517,9 +535,8 @@ func (s *Server) download(x *exchange) {
 	h := x.w.Header()
 	h.Set("Content-Type", "application/octet-stream")
 	h.Set("X-Content-Type-Options", "nosniff")
-	if size := t.Size(); size >= 0 {
-		h.Set("Content-Length", strconv.FormatInt(size, 10))
-	}
+	// SIZE and RETR can observe different versions. Let HTTP frame the bytes
+	// actually received rather than advertise a potentially stale length.
 	x.status = http.StatusOK
 	x.w.WriteHeader(http.StatusOK)
 	var n int64
