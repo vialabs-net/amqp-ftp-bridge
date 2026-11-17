@@ -262,5 +262,5 @@ func validSelector(sel string, pattern *pathpattern.Pattern) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("%q must start with header:, path:, query: or literal:", sel)
+	return fmt.Errorf("%q must start with one of header:, path:, query:, literal: (selector prefixes)", sel)
 }

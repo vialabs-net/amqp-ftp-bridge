@@ -79,7 +79,7 @@ func TestHTTPValidate(t *testing.T) {
 		"target":         {"ftp: main\n      folder: path:dir", "ftp: other\n      folder: path:dir", `unknown ftp target "other"`},
 		"pattern":        {"path: /api/upload/", "path: api/upload", "must start with /"},
 		"path var":       {"folder: path:dir", "folder: path:folder", "path has no {folder}"},
-		"selector":       {"folder: header:X-Folder", "folder: X-Folder", "must start with header:"},
+		"selector":       {"folder: header:X-Folder", "folder: X-Folder", "must start with one of header:"},
 		"empty header":   {"folder: header:X-Folder", "folder: \"header:\"", "has no name"},
 		"missing":        {"file_name: header:X-File-Name", `file_name: ""`, "file_name: is required"},
 		"creds without":  {"      ftp_credential_by: path:disk\n", "", "ftp_credentials needs ftp_credential_by"},
