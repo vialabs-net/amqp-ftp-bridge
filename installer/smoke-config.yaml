@@ -1,5 +1,6 @@
-# Configuration for the MSI smoke test in CI. Nothing listens on these
-# addresses: the service keeps reconnecting to RabbitMQ while it runs.
+# Configuration for the MSI smoke test in CI. Nothing listens on the AMQP
+# address: the service keeps reconnecting to RabbitMQ while it runs. The
+# smoke test starts a local FTP server on 127.0.0.1:2121 when it can.
 amqp:
   url: amqp://127.0.0.1:5672/
   credential: rabbitmq
@@ -8,11 +9,12 @@ metrics:
   listen: 127.0.0.1:9464
 sources:
   - name: files
-    url_prefix: http://127.0.0.1:8080/files/
+    url_prefix: http://127.0.0.1:8081/files/
 ftp:
   - name: main
     address: 127.0.0.1:2121
     credential: ftp
+    timeout: 10s
 routes:
   - queue: smoke
     source: files
@@ -21,3 +23,23 @@ routes:
       source_id: data.id
       folder: literal:incoming
       file_name: data.name
+http:
+  listen: 127.0.0.1:8080
+  credentials: [http-client]
+  max_ftp_sessions: 2
+  ftp_wait: 5s
+  routes:
+    - name: upload
+      action: upload
+      path: /api/upload/
+      ftp: main
+      folder: header:X-Folder
+      file_name: header:X-File-Name
+    - name: download
+      action: download
+      path: "/api/file/{disk}:{dir...}/{name}"
+      ftp: main
+      folder: path:dir
+      file_name: path:name
+      ftp_credential_by: path:disk
+      ftp_credentials: { L: ftp }

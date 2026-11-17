@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -147,5 +148,15 @@ func TestParseTrustedProxy(t *testing.T) {
 	}
 	if _, err := ParseTrustedProxy("nope"); err == nil {
 		t.Error("nope parsed")
+	}
+}
+
+func TestSmokeConfig(t *testing.T) {
+	c, err := Load(filepath.Join("..", "..", "installer", "smoke-config.yaml"))
+	if err != nil {
+		t.Fatalf("installer/smoke-config.yaml: %v", err)
+	}
+	if !c.HTTP.Enabled() || len(c.Routes) != 1 {
+		t.Error("smoke config must have queue and HTTP routes")
 	}
 }

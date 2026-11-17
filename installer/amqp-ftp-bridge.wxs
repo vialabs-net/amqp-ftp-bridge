@@ -49,8 +49,9 @@
     <Property Id="ARPNOMODIFY" Value="1" />
 
     <!--
-      Public properties. SERVICE_ACCOUNT, METRICS_ALLOW_FROM and METRICS_PORT are
-      stored in the registry and reused by upgrades that do not pass them.
+      Public properties. SERVICE_ACCOUNT, METRICS_ALLOW_FROM, METRICS_PORT,
+      HTTP_ALLOW_FROM and HTTP_PORT are stored in the registry and reused by
+      upgrades that do not pass them.
       SERVICE_PASSWORD is never stored.
     -->
     <Property Id="SERVICE_ACCOUNT" Secure="yes" />
@@ -58,6 +59,8 @@
     <Property Id="CONFIG_FILE" Secure="yes" />
     <Property Id="METRICS_ALLOW_FROM" Secure="yes" />
     <Property Id="METRICS_PORT" Secure="yes" />
+    <Property Id="HTTP_ALLOW_FROM" Secure="yes" />
+    <Property Id="HTTP_PORT" Secure="yes" />
 
     <Property Id="SAVED_SERVICE_ACCOUNT">
       <RegistrySearch Id="SavedServiceAccount" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
@@ -70,6 +73,14 @@
     <Property Id="SAVED_METRICS_PORT">
       <RegistrySearch Id="SavedMetricsPort" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
                       Name="MetricsPort" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="SAVED_HTTP_ALLOW_FROM">
+      <RegistrySearch Id="SavedHttpAllowFrom" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
+                      Name="HttpAllowFrom" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="SAVED_HTTP_PORT">
+      <RegistrySearch Id="SavedHttpPort" Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge"
+                      Name="HttpPort" Type="raw" Bitness="always64" />
     </Property>
 
     <!-- Set when %ProgramData%\amqp-ftp-bridge\config.yaml exists before the install. -->
@@ -90,6 +101,12 @@
                  After="RestoreMetricsAllowFrom" Sequence="first" Condition="NOT METRICS_PORT AND SAVED_METRICS_PORT" />
     <SetProperty Id="METRICS_PORT" Action="DefaultMetricsPort" Value="9464"
                  After="RestoreMetricsPort" Sequence="first" Condition="NOT METRICS_PORT" />
+    <SetProperty Id="HTTP_ALLOW_FROM" Action="RestoreHttpAllowFrom" Value="[SAVED_HTTP_ALLOW_FROM]"
+                 After="DefaultMetricsPort" Sequence="first" Condition="NOT HTTP_ALLOW_FROM AND SAVED_HTTP_ALLOW_FROM" />
+    <SetProperty Id="HTTP_PORT" Action="RestoreHttpPort" Value="[SAVED_HTTP_PORT]"
+                 After="RestoreHttpAllowFrom" Sequence="first" Condition="NOT HTTP_PORT AND SAVED_HTTP_PORT" />
+    <SetProperty Id="HTTP_PORT" Action="DefaultHttpPort" Value="8080"
+                 After="RestoreHttpPort" Sequence="first" Condition="NOT HTTP_PORT" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="amqp-ftp-bridge" />
@@ -111,6 +128,7 @@
       <ComponentRef Id="StartService" />
       <ComponentRef Id="CopyConfig" />
       <ComponentRef Id="MetricsFirewallRule" />
+      <ComponentRef Id="HttpFirewallRule" />
     </Feature>
 
     <DirectoryRef Id="INSTALLFOLDER">
@@ -119,7 +137,7 @@
         <ServiceInstall Id="BridgeService"
                         Name="$(var.ServiceName)"
                         DisplayName="AMQP FTP Bridge"
-                        Description="Consumes RabbitMQ queues, downloads each referenced file over HTTP and uploads it by FTP."
+                        Description="Consumes RabbitMQ queues, downloads each referenced file over HTTP and uploads it by FTP. Optionally serves HTTP upload and download routes to FTP."
                         Type="ownProcess"
                         Start="auto"
                         ErrorControl="normal"
@@ -171,6 +189,7 @@
         <RegistryKey Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge">
           <RegistryValue Name="ServiceAccount" Type="string" Value="[SERVICE_ACCOUNT]" KeyPath="yes" />
           <RegistryValue Name="MetricsPort" Type="string" Value="[METRICS_PORT]" />
+          <RegistryValue Name="HttpPort" Type="string" Value="[HTTP_PORT]" />
         </RegistryKey>
       </Component>
 
@@ -211,6 +230,20 @@
                               Protocol="tcp"
                               Profile="all">
           <fw:RemoteAddress Value="[METRICS_ALLOW_FROM]" />
+        </fw:FirewallException>
+      </Component>
+
+      <!-- HTTP_ALLOW_FROM: inbound TCP to HTTP_PORT (http.listen), from that address only. -->
+      <Component Id="HttpFirewallRule" Bitness="always64" Condition="HTTP_ALLOW_FROM">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\vialabs\amqp-ftp-bridge" Name="HttpAllowFrom" Type="string" Value="[HTTP_ALLOW_FROM]" KeyPath="yes" />
+        <fw:FirewallException Id="HttpFirewall"
+                              Name="amqp-ftp-bridge http"
+                              Description="HTTP upload and download routes of amqp-ftp-bridge"
+                              Program="[#BridgeExe]"
+                              Port="[HTTP_PORT]"
+                              Protocol="tcp"
+                              Profile="all">
+          <fw:RemoteAddress Value="[HTTP_ALLOW_FROM]" />
         </fw:FirewallException>
       </Component>
     </DirectoryRef>
