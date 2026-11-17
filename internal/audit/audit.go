@@ -23,6 +23,9 @@ const (
 	StepAcked        = "acked"
 	StepDeadLettered = "dead_lettered"
 	StepDailySummary = "daily_summary"
+	// HTTP requests.
+	StepResponded = "responded"
+	StepFailed    = "failed"
 )
 
 // TimeLayout is RFC 3339 with milliseconds and the local offset.
@@ -32,10 +35,12 @@ const dayLayout = "2006-01-02"
 
 // Record is one audit line. Fields not used by a step are omitted.
 type Record struct {
-	Time     string `json:"ts"`
-	Step     string `json:"step"`
-	MsgID    string `json:"msg_id,omitempty"`
-	Queue    string `json:"queue,omitempty"`
+	Time  string `json:"ts"`
+	Step  string `json:"step"`
+	MsgID string `json:"msg_id,omitempty"`
+	Queue string `json:"queue,omitempty"`
+	// Route replaces Queue in the records of HTTP requests.
+	Route    string `json:"route,omitempty"`
 	Version  string `json:"version"`
 	Hostname string `json:"hostname"`
 
@@ -45,6 +50,11 @@ type Record struct {
 	Body        json.RawMessage `json:"body,omitempty"`
 	BodyText    *string         `json:"body_text,omitempty"`
 	Redelivered *bool           `json:"redelivered,omitempty"`
+
+	// received (HTTP)
+	Method        string `json:"method,omitempty"`
+	ClientIP      string `json:"client_ip,omitempty"`
+	BytesDeclared *int64 `json:"bytes_declared,omitempty"`
 
 	// downloaded
 	Source     string `json:"source,omitempty"`
@@ -62,16 +72,36 @@ type Record struct {
 	Bytes *int64 `json:"bytes,omitempty"`
 	Ms    *int64 `json:"ms,omitempty"`
 
-	// acked
+	// acked, responded
 	TotalMs *int64 `json:"total_ms,omitempty"`
 
-	// dead_lettered
+	// dead_lettered, failed
 	FailedStep string `json:"failed_step,omitempty"`
 	Error      string `json:"error,omitempty"`
 
 	// daily_summary
-	Date   string             `json:"date,omitempty"`
-	Queues map[string]*Totals `json:"queues,omitempty"`
+	Date   string                  `json:"date,omitempty"`
+	Queues map[string]*Totals      `json:"queues,omitempty"`
+	Routes map[string]*RouteTotals `json:"routes,omitempty"`
+}
+
+// RouteTotals are the per-HTTP-route counters of a daily summary.
+type RouteTotals struct {
+	Received   int64 `json:"received"`
+	Uploaded   int64 `json:"uploaded"`
+	Downloaded int64 `json:"downloaded"`
+	Failed     int64 `json:"failed"`
+	Bytes      int64 `json:"bytes"`
+}
+
+// dayTotals are the counters of one local day.
+type dayTotals struct {
+	queues map[string]*Totals
+	routes map[string]*RouteTotals
+}
+
+func newDayTotals() dayTotals {
+	return dayTotals{queues: map[string]*Totals{}, routes: map[string]*RouteTotals{}}
 }
 
 // Totals are the per-queue counters of a daily summary.
@@ -101,7 +131,7 @@ type Writer struct {
 	mu        sync.Mutex
 	file      *os.File
 	fileDay   string
-	totals    map[string]*Totals
+	totals    dayTotals
 	totalsDay string
 }
 
@@ -171,13 +201,13 @@ func (w *Writer) Rollover() error {
 
 func (w *Writer) rolloverLocked(newDay string) error {
 	err := w.appendLocked(w.totalsDay, w.summaryRecord(w.totalsDay, w.totals))
-	w.totals, w.totalsDay = map[string]*Totals{}, newDay
+	w.totals, w.totalsDay = newDayTotals(), newDay
 	return err
 }
 
-func (w *Writer) summaryRecord(day string, totals map[string]*Totals) Record {
-	if totals == nil {
-		totals = map[string]*Totals{}
+func (w *Writer) summaryRecord(day string, totals dayTotals) Record {
+	if totals.queues == nil {
+		totals.queues = map[string]*Totals{}
 	}
 	return Record{
 		Time:     w.now().Format(TimeLayout),
@@ -185,22 +215,26 @@ func (w *Writer) summaryRecord(day string, totals map[string]*Totals) Record {
 		Version:  w.version,
 		Hostname: w.hostname,
 		Date:     day,
-		Queues:   totals,
+		Queues:   totals.queues,
+		Routes:   totals.routes,
 	}
 }
 
 func (w *Writer) count(r Record) {
-	if r.Queue == "" {
-		return
-	}
 	add(w.totals, r)
 }
 
-func add(totals map[string]*Totals, r Record) {
-	t := totals[r.Queue]
+func add(totals dayTotals, r Record) {
+	if r.Route != "" {
+		addRoute(totals.routes, r)
+	}
+	if r.Queue == "" {
+		return
+	}
+	t := totals.queues[r.Queue]
 	if t == nil {
 		t = &Totals{}
-		totals[r.Queue] = t
+		totals.queues[r.Queue] = t
 	}
 	switch r.Step {
 	case StepReceived:
@@ -257,12 +291,46 @@ func (w *Writer) appendLocked(day string, r Record) error {
 	return nil
 }
 
-// Totals returns a copy of today's totals.
+func addRoute(routes map[string]*RouteTotals, r Record) {
+	t := routes[r.Route]
+	if t == nil {
+		t = &RouteTotals{}
+		routes[r.Route] = t
+	}
+	switch r.Step {
+	case StepReceived:
+		t.Received++
+	case StepUploaded, StepDownloaded:
+		if r.Step == StepUploaded {
+			t.Uploaded++
+		} else {
+			t.Downloaded++
+		}
+		if r.Bytes != nil {
+			t.Bytes += *r.Bytes
+		}
+	case StepFailed:
+		t.Failed++
+	}
+}
+
+// Totals returns a copy of today's per-queue totals.
 func (w *Writer) Totals() map[string]Totals {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make(map[string]Totals, len(w.totals))
-	for k, v := range w.totals {
+	out := make(map[string]Totals, len(w.totals.queues))
+	for k, v := range w.totals.queues {
+		out[k] = *v
+	}
+	return out
+}
+
+// RouteTotals returns a copy of today's per-HTTP-route totals.
+func (w *Writer) RouteTotals() map[string]RouteTotals {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]RouteTotals, len(w.totals.routes))
+	for k, v := range w.totals.routes {
 		out[k] = *v
 	}
 	return out
@@ -282,8 +350,8 @@ func (w *Writer) Close() error {
 
 // summarize computes the totals of an audit file and reports whether it
 // already holds a daily summary.
-func summarize(path string) (map[string]*Totals, bool, error) {
-	totals := map[string]*Totals{}
+func summarize(path string) (dayTotals, bool, error) {
+	totals := newDayTotals()
 	f, err := os.Open(path)
 	if err != nil {
 		return totals, false, err
@@ -293,7 +361,7 @@ func summarize(path string) (map[string]*Totals, bool, error) {
 	err = scan(f, func(r Record) bool {
 		if r.Step == StepDailySummary {
 			hasSummary = true
-		} else if r.Queue != "" {
+		} else {
 			add(totals, r)
 		}
 		return true
