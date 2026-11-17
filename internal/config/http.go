@@ -171,6 +171,11 @@ func (h HTTP) validate(targets map[string]bool) []error {
 	if len(h.Credentials) == 0 {
 		add("http.credentials: at least one credential is required")
 	}
+	for i, name := range h.Credentials {
+		if name == "" {
+			add("http.credentials[%d]: credential name is required", i)
+		}
+	}
 	for i, p := range h.TrustedProxies {
 		if _, err := ParseTrustedProxy(p); err != nil {
 			add("http.trusted_proxies[%d]: %q is not an IP address or CIDR prefix", i, p)

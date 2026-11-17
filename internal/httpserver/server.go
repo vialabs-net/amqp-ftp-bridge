@@ -182,7 +182,7 @@ func (t ftpTransfer) Size() int64 { return t.Download.Size }
 // When grace ends first, it cancels them and closes their connections. It
 // returns nil after a shutdown, or the error that stopped the server.
 func (s *Server) Serve(ctx context.Context, ln net.Listener, grace time.Duration) error {
-	hard, cancelHard := context.WithCancel(context.Background())
+	hard, cancelHard := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelHard()
 	s.hard = hard
 	if s.NewFTP == nil {
@@ -207,7 +207,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, grace time.Duration
 		return err
 	case <-ctx.Done():
 	}
-	sctx, cancel := context.WithTimeout(context.Background(), grace)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
 		s.log().Warn("http shutdown timeout: cancelling requests in flight")
