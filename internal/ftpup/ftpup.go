@@ -303,3 +303,65 @@ func (c *Client) recover(conn *ftp.ServerConn) error {
 	}
 	return nil
 }
+
+// StatusFileUnavailable is the reply to RETR or SIZE for a missing file.
+const StatusFileUnavailable = ftp.StatusFileUnavailable
+
+// Code returns the FTP reply code carried by err, or 0.
+func Code(err error) int { return codeOf(err) }
+
+// Op returns the failed operation of err ("connect", "login", "retr", ...),
+// without its path, or "" when err is not an FTP error.
+func Op(err error) string {
+	var e *Error
+	if !errors.As(err, &e) {
+		return ""
+	}
+	op, _, _ := strings.Cut(e.Op, " ")
+	return op
+}
+
+// Download is an open RETR transfer. Read the file from it, then Close.
+type Download struct {
+	// Size is the file size reported by SIZE, or -1 when unknown.
+	Size int64
+	conn *ftp.ServerConn
+	resp *ftp.Response
+}
+
+// Read reads the file contents.
+func (d *Download) Read(p []byte) (int, error) { return d.resp.Read(p) }
+
+// Close ends the transfer and the session. It returns the final reply code
+// (226) when the server confirmed a complete transfer.
+func (d *Download) Close() (int, error) {
+	err := wrap("retr", d.resp.Close())
+	_ = d.conn.Quit()
+	if err != nil {
+		return codeOf(err), err
+	}
+	return StatusTransferOK, nil
+}
+
+// Download opens <folder>/<name> on the server. The session stays open until
+// the returned Download is closed. Cancelling ctx aborts the transfer.
+func (c *Client) Download(ctx context.Context, folder, name string) (*Download, error) {
+	remote, err := Join(folder, name)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	size, err := conn.FileSize(remote)
+	if err != nil {
+		size = -1
+	}
+	resp, err := conn.Retr(remote)
+	if err != nil {
+		_ = conn.Quit()
+		return nil, wrap("retr "+remote, err)
+	}
+	return &Download{Size: size, conn: conn, resp: resp}, nil
+}
