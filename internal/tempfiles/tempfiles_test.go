@@ -8,7 +8,7 @@ import (
 
 func TestAbandonedFilesAndLiveOwner(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"download-old.tmp", "field-old.tmp", "keep.tmp"} {
+	for _, name := range []string{"download-old.tmp", "field-old.tmp", "http-old.tmp", "keep.tmp"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("data"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -18,7 +18,7 @@ func TestAbandonedFilesAndLiveOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer owner.Close()
-	for _, name := range []string{"download-old.tmp", "field-old.tmp"} {
+	for _, name := range []string{"download-old.tmp", "field-old.tmp", "http-old.tmp"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("orphan remains: %s: %v", name, err)
 		}
