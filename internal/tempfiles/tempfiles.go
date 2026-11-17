@@ -29,7 +29,7 @@ func Acquire(dir string) (*os.File, error) {
 	if err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
-			if entry.Type().IsRegular() && (strings.HasPrefix(name, "download-") || strings.HasPrefix(name, "field-")) && strings.HasSuffix(name, ".tmp") {
+			if entry.Type().IsRegular() && (strings.HasPrefix(name, "download-") || strings.HasPrefix(name, "field-") || strings.HasPrefix(name, "http-")) && strings.HasSuffix(name, ".tmp") {
 				if err = os.Remove(filepath.Join(dir, name)); err != nil {
 					break
 				}

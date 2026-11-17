@@ -101,3 +101,50 @@ routes:
     dead_letter:
       exchange: files.legacy_deadLetter
       routing_key: files.legacy_deadLetter
+
+# Optional HTTP routes: upload a request body to FTP, or download a file from
+# FTP, in one HTTP request. Off unless listen is set. A service with HTTP
+# routes only can omit amqp, dead_letter, sources and routes.
+http:
+  listen: "0.0.0.0:8080"
+  # HTTP Basic users, stored with `creds set`. At least one.
+  credentials: [http-client]
+  # The client IP is read from X-Forwarded-For only when the peer is one of
+  # these addresses or prefixes.
+  trusted_proxies: [192.0.2.10]
+  # FTP sessions open at once for all HTTP routes. Default: 8.
+  max_ftp_sessions: 8
+  # Wait for a free FTP session, then answer 503. Default: 30s.
+  ftp_wait: 30s
+  # Larger uploads get 413. Default: 200MiB.
+  max_upload_bytes: 200MiB
+  # Defaults: 10s, 10m, 10m, 2m.
+  read_header_timeout: 10s
+  read_timeout: 10m
+  write_timeout: 10m
+  idle_timeout: 2m
+  routes:
+    # POST /api/upload/ with headers X-Folder and X-File-Name.
+    - name: upload
+      action: upload
+      method: POST
+      path: /api/upload/
+      ftp: main
+      # header:Name, path:var, query:name or literal:text.
+      folder: header:X-Folder
+      file_name: header:X-File-Name
+
+    # GET /api/file/L:/reports/2026/a.pdf downloads /reports/2026/a.pdf with
+    # the login of credential ftp-disk-l.
+    #   {name}     text inside one path segment
+    #   {name...}  any text across "/", may be empty or start with "/"
+    - name: download
+      action: download
+      method: GET
+      path: "/api/file/{disk}:{dir...}/{name}"
+      ftp: main
+      folder: path:dir
+      file_name: path:name
+      # Optional: pick the FTP login from a value. An unknown value gets 404.
+      ftp_credential_by: path:disk
+      ftp_credentials: { L: ftp-disk-l }

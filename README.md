@@ -6,6 +6,8 @@ A Windows service that consumes RabbitMQ (AMQP 0-9-1) queues, downloads the file
 
 Each route links one queue to one download source and one FTP target. The message mapping is set in the configuration, so the service has no knowledge of any specific system.
 
+It can also serve HTTP routes that upload a request body to the FTP server, or download a file from it, and answer in the same HTTP response. See [HTTP server](#http-server). The service runs with queue routes, HTTP routes, or both.
+
 ## Behaviour
 
 For each message, with `prefetch=1` and manual acknowledgement:
@@ -40,6 +42,118 @@ If the process stops during a message, RabbitMQ redelivers it and the upload ove
 
 The service reconnects to RabbitMQ with exponential backoff (1 s up to `reconnect_max`, default 60 s). On stop it cancels the consumers, waits for the in-flight messages (up to `shutdown_timeout`) and exits.
 
+## HTTP server
+
+Off unless `http.listen` is set. Without queue `routes`, the `amqp` section can be omitted.
+
+```yaml
+http:
+  listen: "0.0.0.0:8080"
+  credentials: [http-client]
+  routes:
+    - name: upload
+      action: upload
+      path: /api/upload/
+      ftp: main
+      folder: header:X-Folder
+      file_name: header:X-File-Name
+    - name: download
+      action: download
+      path: "/api/file/{disk}:{dir...}/{name}"
+      ftp: main
+      folder: path:dir
+      file_name: path:name
+      ftp_credential_by: path:disk
+      ftp_credentials: { L: ftp-disk-l }
+```
+
+**Settings**
+
+| Key | Default | Purpose |
+|---|---|---|
+| `http.listen` | empty (off) | `host:port` of the listener |
+| `http.credentials` | required | Credential names of the HTTP Basic users |
+| `http.trusted_proxies` | none | IPs or CIDR prefixes. The client IP comes from `X-Forwarded-For` only when the peer is one of them. |
+| `http.max_ftp_sessions` | `8` | FTP sessions open at once for all HTTP routes |
+| `http.ftp_wait` | `30s` | Wait for a free FTP session, then 503 |
+| `http.max_upload_bytes` | `200MiB` | Larger uploads get 413. Units: `B`, `KB`, `MB`, `GB`, `KiB`, `MiB`, `GiB`. |
+| `http.read_header_timeout` | `10s` | Time to read the request headers |
+| `http.read_timeout` | `10m` | Time to read the whole request |
+| `http.write_timeout` | `10m` | Time to write the response. Bounds the download time. |
+| `http.idle_timeout` | `2m` | Keep-alive idle time |
+| `http.routes[].name` | required | Route name in audit records and metrics |
+| `http.routes[].action` | required | `upload` or `download` |
+| `http.routes[].method` | `POST` (upload), `GET` (download) | HTTP method. A `GET` route also answers `HEAD`. |
+| `http.routes[].path` | required | Path pattern |
+| `http.routes[].ftp` | required | FTP target name |
+| `http.routes[].folder` | required | Selector for the FTP folder |
+| `http.routes[].file_name` | required | Selector for the FTP file name |
+| `http.routes[].ftp_credential_by` | none | Selector whose value picks the FTP login |
+| `http.routes[].ftp_credentials` | none | Value to credential name. Exact match first, then case-insensitive. An unknown value gets 404. Without it the target's `credential` is used. |
+
+**Selectors**
+
+| Form | Reads |
+|---|---|
+| `header:X-Folder` | Request header |
+| `path:dir` | Value of `{dir}` in the path pattern |
+| `query:name` | Query parameter |
+| `literal:inbox` | Fixed value |
+
+**Path patterns**
+
+| Element | Matches |
+|---|---|
+| Literal text | The same text. Percent-encoded characters match their decoded form. |
+| `{name}` | One or more characters inside one segment. It can share a segment with literal text: `{disk}:`. |
+| `{name...}` | Any text across `/`. It can be empty or start with `/`. |
+
+Two values must be separated by literal text. Values are URL-decoded. An encoded `/` (`%2F`) stays inside its segment. FTP credential keys must be distinct when compared case-insensitively.
+
+| Pattern | Path | Values |
+|---|---|---|
+| `/api/file/{disk}:{dir...}/{name}` | `/api/file/L:/a/b/c.pdf` | `disk=L`, `dir=/a/b`, `name=c.pdf` |
+| `/api/file/{disk}:{dir...}/{name}` | `/api/file/L:a/c.pdf` | `disk=L`, `dir=a`, `name=c.pdf` |
+
+A folder or file name with a `..` segment or a NUL, or a file name with `/` or `\`, gets 400.
+
+**Upload**
+
+1. Check the Basic credentials.
+2. Write the body to a temporary file in `temp_dir`. Bodies over `max_upload_bytes` get 413.
+3. Take an FTP session.
+4. Upload like a queue route: passive, binary, missing folders created, file overwritten.
+5. Answer 200 with an empty body.
+
+A client that disconnects after sending its body does not stop the FTP upload.
+
+At most twice `max_ftp_sessions` uploads can receive or retain temporary bodies at once. Further uploads wait up to `ftp_wait` before receiving their body, then get 503 with `Retry-After` if capacity is still full. This bounds buffered disk contents to twice `max_ftp_sessions` times `max_upload_bytes`.
+
+**Download**
+
+The service takes an FTP session and streams `RETR` to the response, with `Content-Type: application/octet-stream`. It does not advertise the earlier FTP `SIZE`: a concurrent upload can replace that file before `RETR`. HTTP frames the bytes actually transferred. The session is freed when the stream ends, the client disconnects or `write_timeout` expires. If the FTP transfer breaks after the response started, the connection is aborted, so the client sees an error and not a short file.
+
+**Status codes**
+
+| Code | When |
+|---|---|
+| 200 | Uploaded, or download streamed |
+| 400 | Missing header or query value, invalid folder or file name, unreadable body |
+| 401 | Missing or wrong credentials. Has `WWW-Authenticate`. |
+| 404 | No route, FTP reply 550 on download, unknown `ftp_credential_by` value |
+| 405 | Path matches a route with another method. Has `Allow`. |
+| 413 | Body larger than `max_upload_bytes` |
+| 502 | FTP connect, login or transfer failed |
+| 503 | No upload capacity or FTP session free within `ftp_wait`. Has `Retry-After`. |
+
+Error bodies are one line of plain text, such as `FTP login failed (530)`. They never hold paths, credentials or file contents. HTTP requests have no dead-letter: the caller gets the error.
+
+Each response has `X-Request-Id`: the request's own value (printable ASCII, up to 128 characters), or a new UUID. It is the `msg_id` of the audit records.
+
+On stop, the listener closes and requests in flight get up to `shutdown_timeout` to finish. Then they are cancelled.
+
+Open the port in the Windows Firewall with the MSI property `HTTP_ALLOW_FROM`. See [Install](#install).
+
 ## Install
 
 Download `amqp-ftp-bridge.msi` from the [releases](https://github.com/vialabs-net/amqp-ftp-bridge/releases). Run it as an administrator.
@@ -62,8 +176,10 @@ The service `amqp-ftp-bridge` ("AMQP FTP Bridge") starts automatically and resta
 | `CONFIG_FILE` | none | Full path of a configuration copied to `%ProgramData%\amqp-ftp-bridge\config.yaml`, replacing the existing one |
 | `METRICS_ALLOW_FROM` | none | Adds an inbound firewall rule for TCP `METRICS_PORT` from this address only (`192.0.2.10`, or a list: `192.0.2.10,192.0.2.0/24`). No rule when empty. |
 | `METRICS_PORT` | `9464` | Port of the firewall rule. Must match `metrics.listen`. |
+| `HTTP_ALLOW_FROM` | none | Adds an inbound firewall rule for TCP `HTTP_PORT` from this address only. No rule when empty. |
+| `HTTP_PORT` | `8080` | Port of the HTTP firewall rule. Must match `http.listen`. |
 
-`SERVICE_ACCOUNT`, `METRICS_ALLOW_FROM` and `METRICS_PORT` are stored in `HKLM\SOFTWARE\vialabs\amqp-ftp-bridge`. An upgrade that does not pass them uses the stored values.
+`SERVICE_ACCOUNT`, `METRICS_ALLOW_FROM`, `METRICS_PORT`, `HTTP_ALLOW_FROM` and `HTTP_PORT` are stored in `HKLM\SOFTWARE\vialabs\amqp-ftp-bridge`. An upgrade that does not pass them uses the stored values.
 
 For a custom user or gMSA, provision the account on the machine before installing. The MSI grants it [Log on as a service](https://learn.microsoft.com/en-us/windows/win32/msi/serviceinstall-table); domain policies that deny service logon still take precedence. The MSI does not create accounts. A gMSA uses an empty `SERVICE_PASSWORD`. The logon right is retained on uninstall because other services may use the account.
 
@@ -87,7 +203,7 @@ Install the new MSI the same way. The upgrade replaces the program and keeps the
 msiexec /x amqp-ftp-bridge.msi /qn
 ```
 
-Or remove "amqp-ftp-bridge" in Settings, Apps. Uninstall removes the program, the service, the Event Log source and the firewall rule. `%ProgramData%\amqp-ftp-bridge` stays: delete it to remove the configuration, credentials and logs.
+Or remove "amqp-ftp-bridge" in Settings, Apps. Uninstall removes the program, the service, the Event Log source and the firewall rules. `%ProgramData%\amqp-ftp-bridge` stays: delete it to remove the configuration, credentials and logs.
 
 Remove a service installed with `amqp-ftp-bridge service install` (`service uninstall`) before installing the MSI.
 
@@ -112,8 +228,8 @@ YAML. Default path: `%ProgramData%\amqp-ftp-bridge\config.yaml`. Override with `
 | `temp_dir` | `<data_dir>\tmp` | Downloads before upload |
 | `shutdown_timeout` | `5m` | Wait for in-flight messages on stop |
 | `audit.retention_days` | `365` | Log files older than this are deleted |
-| `amqp.url` | required | `amqp://` or `amqps://` URL without credentials |
-| `amqp.credential` | required | Credential name for RabbitMQ |
+| `amqp.url` | required with `routes` | `amqp://` or `amqps://` URL without credentials |
+| `amqp.credential` | required with `routes` | Credential name for RabbitMQ |
 | `amqp.heartbeat` | `10s` | AMQP heartbeat |
 | `amqp.reconnect_max` | `60s` | Longest reconnection wait |
 | `dead_letter.exchange_suffix` | `_deadLetter` | Dead-letter exchange is `<queue><suffix>` |
@@ -130,7 +246,8 @@ YAML. Default path: `%ProgramData%\amqp-ftp-bridge\config.yaml`. Override with `
 | `ftp[].address` | required | `host:port` |
 | `ftp[].credential` | required | Credential for the FTP login |
 | `ftp[].timeout` | `1m` | Timeout for each FTP operation |
-| `routes[].queue` | required | Queue to consume |
+| `http` | off | HTTP routes. See [HTTP server](#http-server). |
+| `routes[].queue` | required unless `http.routes` is set | Queue to consume |
 | `routes[].source` | required | Source name |
 | `routes[].target` | required | FTP target name |
 | `routes[].mapping.source_id` | required | Selector for the download id |
@@ -155,7 +272,7 @@ YAML. Default path: `%ProgramData%\amqp-ftp-bridge\config.yaml`. Override with `
 
 JSON Lines, one file per local day: `<log_dir>/audit-YYYY-MM-DD.jsonl`. One record per step. All records of a message share `msg_id`: the AMQP `message-id`, or a generated UUID.
 
-Every record has `ts` (RFC 3339, milliseconds, local offset), `step`, `msg_id`, `queue`, `version` and `hostname`.
+Every record has `ts` (RFC 3339, milliseconds, local offset), `step`, `msg_id`, `queue`, `version` and `hostname`. Records of HTTP requests have `route` instead of `queue`, and `msg_id` is the `X-Request-Id`.
 
 | `step` | Fields |
 |---|---|
@@ -164,7 +281,17 @@ Every record has `ts` (RFC 3339, milliseconds, local offset), `step`, `msg_id`, 
 | `uploaded` | `folder`, `file_name`, `ftp_code`, `bytes`, `ms` |
 | `acked` | `total_ms` |
 | `dead_lettered` | `failed_step`, `error`, `http_status` or `ftp_code` when known, `folder`, `file_name` when known |
-| `daily_summary` | `date`, `queues`: per queue `received`, `uploaded`, `dead_lettered`, `bytes` |
+| `daily_summary` | `date`, `queues`: per queue `received`, `uploaded`, `dead_lettered`, `bytes`; `routes`: per HTTP route `received`, `uploaded`, `downloaded`, `failed`, `bytes` |
+
+HTTP requests:
+
+| `step` | Fields |
+|---|---|
+| `received` | `method`, `client_ip`, `bytes_declared` (uploads with `Content-Length`) |
+| `uploaded` | `folder`, `file_name`, `ftp_code`, `bytes`, `sha256`, `ms` |
+| `downloaded` | `folder`, `file_name`, `ftp_code`, `bytes`, `ms` |
+| `failed` | `failed_step` (`auth`, `mapping`, `body`, `ftp_wait`, `upload`, `download`, `transfer`), `error`, `ftp_code` when known |
+| `responded` | `http_status`, `total_ms` |
 
 `daily_summary` is written at local midnight to the file of the day that ended. At startup, today's totals are rebuilt from today's file, and a missing summary for yesterday is written.
 
@@ -201,13 +328,19 @@ Off by default. Set `metrics.listen` (for example `0.0.0.0:9464`).
 | `bridge_amqp_connected` | |
 | `bridge_amqp_reconnects_total` | |
 | `bridge_build_info` | `version`, `commit` |
+| `bridge_http_requests_total` | `route` (`unmatched` when no route matches), `code` |
+| `bridge_http_duration_seconds` | `route` |
+| `bridge_http_inflight` | `route` |
+| `bridge_ftp_sessions_in_use` | |
+| `bridge_ftp_session_wait_seconds` | |
+| `bridge_ftp_session_rejected_total` | |
 
 The Go and process collectors are included.
 
 | Path | Answer |
 |---|---|
 | `/healthz` | 200 while the process runs |
-| `/readyz` | 200 when connected to RabbitMQ and the last FTP upload succeeded, else 503 |
+| `/readyz` | 200 when connected to RabbitMQ (not checked without queue routes) and the last FTP transfer succeeded, else 503 |
 
 Other metrics backends implement the `bridge.Observer` interface in `internal/bridge/observer.go`.
 
@@ -242,8 +375,8 @@ amqp-ftp-bridge <command> [--config <path>]
 | `service start` / `service stop` | Start or stop the service |
 | `creds set <name>` | Store a credential. `--data-dir` overrides `data_dir`. |
 | `creds secure --data-dir <path>` | Migrate existing Windows credential ACLs to allow the service SID to read them. Requires an administrator; run automatically by the MSI. |
-| `check` | Connect to RabbitMQ and check each queue exists (passive), log in to each FTP target, request each source prefix (HEAD, then GET). Consumes nothing. Exit code 1 if any check fails. |
-| `audit` | Print the records of matching messages. Flags: `--date YYYY-MM-DD` (default today), `--queue`, `--file` (glob on the file name), `--result` (`acked`, `dead_lettered`, `incomplete`), `--log-dir`. |
+| `check` | Read each credential, connect to RabbitMQ and check each queue exists (passive), log in to each FTP target with each login the configuration uses, request each source prefix (HEAD, then GET), and bind `http.listen`. Consumes nothing. Exit code 1 if any check fails. |
+| `audit` | Print the records of matching messages. Flags: `--date YYYY-MM-DD` (default today), `--queue`, `--route`, `--file` (glob on the file name), `--result` (`acked`, `dead_lettered`, `responded`, `failed`, `incomplete`), `--log-dir`. |
 | `version` | Print version and commit |
 
 ## Build and test

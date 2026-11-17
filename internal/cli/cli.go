@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -35,7 +36,7 @@ Commands:
   creds set <name>     store a credential (prompts for user and password)
   creds secure         migrate Windows credential ACLs (administrator only)
   check                test the connections to RabbitMQ, FTP and every source
-  audit                print audit records (--date, --queue, --file, --result)
+  audit                print audit records (--date, --queue, --route, --file, --result)
   version              print the version
 
 Common flags:
@@ -54,7 +55,9 @@ var (
 	svcStart    = winsvc.Start
 	svcStop     = winsvc.Stop
 	executable  = os.Executable
-	notifyCtx   = func() (context.Context, context.CancelFunc) {
+	// ftpDial, when set, opens the FTP connections of HTTP routes.
+	ftpDial   func(ctx context.Context, network, address string) (net.Conn, error)
+	notifyCtx = func() (context.Context, context.CancelFunc) {
 		return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	}
 	readPasswd  = term.ReadPassword
@@ -250,8 +253,9 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 	var f audit.Filter
 	fs.StringVar(&f.Date, "date", "", "day to read, YYYY-MM-DD (default: today)")
 	fs.StringVar(&f.Queue, "queue", "", "queue name")
+	fs.StringVar(&f.Route, "route", "", "HTTP route name")
 	fs.StringVar(&f.File, "file", "", "file name pattern, for example '*.pdf'")
-	fs.StringVar(&f.Result, "result", "", "acked, dead_lettered or incomplete")
+	fs.StringVar(&f.Result, "result", "", "acked, dead_lettered, responded, failed or incomplete")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}

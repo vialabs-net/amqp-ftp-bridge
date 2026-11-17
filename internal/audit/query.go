@@ -16,6 +16,9 @@ const (
 	ResultAcked        = "acked"
 	ResultDeadLettered = "dead_lettered"
 	ResultIncomplete   = "incomplete"
+	// HTTP requests: answered without a failure, or with one.
+	ResultResponded = "responded"
+	ResultFailed    = "failed"
 )
 
 // Filter selects messages in an audit file. Empty fields match everything.
@@ -24,9 +27,11 @@ type Filter struct {
 	Date string
 	// Queue matches the queue name exactly.
 	Queue string
+	// Route matches the HTTP route name exactly.
+	Route string
 	// File is a pattern (path.Match syntax) for the uploaded file name.
 	File string
-	// Result is acked, dead_lettered or incomplete.
+	// Result is acked, dead_lettered, responded, failed or incomplete.
 	Result string
 }
 
@@ -42,9 +47,9 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 		return 0, fmt.Errorf("date must be YYYY-MM-DD: %q", f.Date)
 	}
 	switch f.Result {
-	case "", ResultAcked, ResultDeadLettered, ResultIncomplete:
+	case "", ResultAcked, ResultDeadLettered, ResultResponded, ResultFailed, ResultIncomplete:
 	default:
-		return 0, fmt.Errorf("result must be acked, dead_lettered or incomplete: %q", f.Result)
+		return 0, fmt.Errorf("result must be acked, dead_lettered, responded, failed or incomplete: %q", f.Result)
 	}
 	if f.File != "" {
 		if _, err := path.Match(f.File, ""); err != nil {
@@ -61,7 +66,7 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 		records []Record
 		lines   [][]byte
 	}
-	type messageKey struct{ queue, id string }
+	type messageKey struct{ queue, route, id string }
 	var order []messageKey
 	msgs := map[messageKey]*message{}
 	var summaries [][]byte
@@ -85,7 +90,7 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 			summaries = append(summaries, line)
 			continue
 		}
-		key := messageKey{r.Queue, r.MsgID}
+		key := messageKey{r.Queue, r.Route, r.MsgID}
 		m := msgs[key]
 		if m == nil {
 			m = &message{}
@@ -109,7 +114,7 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 			}
 		}
 	}
-	if f.Queue == "" && f.File == "" && f.Result == "" {
+	if f.Queue == "" && f.Route == "" && f.File == "" && f.Result == "" {
 		for _, l := range summaries {
 			if _, err := out.Write(append(l, '\n')); err != nil {
 				return n, err
@@ -121,16 +126,24 @@ func Query(dir string, f Filter, out io.Writer) (int, error) {
 
 func (f Filter) matches(records []Record) bool {
 	result := ResultIncomplete
-	queueOK, fileOK := f.Queue == "", f.File == ""
+	queueOK, routeOK, fileOK := f.Queue == "", f.Route == "", f.File == ""
+	failed := false
 	for _, r := range records {
 		switch r.Step {
 		case StepAcked:
 			result = ResultAcked
 		case StepDeadLettered:
 			result = ResultDeadLettered
+		case StepResponded:
+			result = ResultResponded
+		case StepFailed:
+			failed = true
 		}
 		if r.Queue == f.Queue {
 			queueOK = true
+		}
+		if r.Route == f.Route {
+			routeOK = true
 		}
 		if f.File != "" && r.FileName != "" {
 			if ok, _ := path.Match(f.File, r.FileName); ok {
@@ -138,5 +151,8 @@ func (f Filter) matches(records []Record) bool {
 			}
 		}
 	}
-	return queueOK && fileOK && (f.Result == "" || f.Result == result)
+	if failed {
+		result = ResultFailed
+	}
+	return queueOK && routeOK && fileOK && (f.Result == "" || f.Result == result)
 }

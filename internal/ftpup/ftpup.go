@@ -31,7 +31,10 @@ type Client struct {
 	Timeout  time.Duration
 	// RecoveryDir is private to one route, under the service's locked temp dir.
 	RecoveryDir string
-	mu          sync.Mutex
+	// Dial, when set, opens the control and data connections instead of
+	// net.Dialer. Tests use it to count sessions.
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
+	mu   sync.Mutex
 }
 
 // Error is a failed FTP operation with the server reply code, if any.
@@ -95,8 +98,17 @@ func (c *Client) connect(ctx context.Context) (*ftp.ServerConn, error) {
 	// The library's DialWithTimeout only bounds the TCP connection. Apply
 	// deadlines and cancellation to both control and passive data sockets.
 	dial := func(network, address string) (net.Conn, error) {
-		d := net.Dialer{Timeout: c.Timeout}
-		raw, err := d.DialContext(ctx, network, address)
+		dialCtx := ctx
+		if c.Timeout > 0 {
+			var cancel context.CancelFunc
+			dialCtx, cancel = context.WithTimeout(ctx, c.Timeout)
+			defer cancel()
+		}
+		dialer := c.Dial
+		if dialer == nil {
+			dialer = (&net.Dialer{}).DialContext
+		}
+		raw, err := dialer(dialCtx, network, address)
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +167,11 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 	if err != nil {
 		return codeOf(err), err
 	}
-	defer func() { _ = conn.Quit() }()
+	defer func() {
+		if conn != nil {
+			_ = conn.Quit()
+		}
+	}()
 	if err := c.recover(conn); err != nil {
 		return 0, err
 	}
@@ -182,6 +198,9 @@ func (c *Client) Upload(ctx context.Context, folder, name string, r io.Reader) (
 			return
 		}
 		// The transfer connection can already be closed by cancellation or EOF.
+		// Close it before reconnecting so cleanup still consumes just one session.
+		_ = conn.Quit()
+		conn = nil
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		cleanup, err := c.connect(cleanupCtx)
@@ -302,4 +321,66 @@ func (c *Client) recover(conn *ftp.ServerConn) error {
 		}
 	}
 	return nil
+}
+
+// StatusFileUnavailable is the reply to RETR or SIZE for a missing file.
+const StatusFileUnavailable = ftp.StatusFileUnavailable
+
+// Code returns the FTP reply code carried by err, or 0.
+func Code(err error) int { return codeOf(err) }
+
+// Op returns the failed operation of err ("connect", "login", "retr", ...),
+// without its path, or "" when err is not an FTP error.
+func Op(err error) string {
+	var e *Error
+	if !errors.As(err, &e) {
+		return ""
+	}
+	op, _, _ := strings.Cut(e.Op, " ")
+	return op
+}
+
+// Download is an open RETR transfer. Read the file from it, then Close.
+type Download struct {
+	// Size is the file size reported by SIZE, or -1 when unknown.
+	Size int64
+	conn *ftp.ServerConn
+	resp *ftp.Response
+}
+
+// Read reads the file contents.
+func (d *Download) Read(p []byte) (int, error) { return d.resp.Read(p) }
+
+// Close ends the transfer and the session. It returns the final reply code
+// (226) when the server confirmed a complete transfer.
+func (d *Download) Close() (int, error) {
+	err := wrap("retr", d.resp.Close())
+	_ = d.conn.Quit()
+	if err != nil {
+		return codeOf(err), err
+	}
+	return StatusTransferOK, nil
+}
+
+// Download opens <folder>/<name> on the server. The session stays open until
+// the returned Download is closed. Cancelling ctx aborts the transfer.
+func (c *Client) Download(ctx context.Context, folder, name string) (*Download, error) {
+	remote, err := Join(folder, name)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	size, err := conn.FileSize(remote)
+	if err != nil {
+		size = -1
+	}
+	resp, err := conn.Retr(remote)
+	if err != nil {
+		_ = conn.Quit()
+		return nil, wrap("retr "+remote, err)
+	}
+	return &Download{Size: size, conn: conn, resp: resp}, nil
 }

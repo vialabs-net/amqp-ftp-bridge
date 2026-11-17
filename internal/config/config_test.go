@@ -143,7 +143,7 @@ func TestExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.example.yaml: %v", err)
 	}
-	if len(c.Routes) == 0 {
-		t.Error("no routes")
+	if len(c.Routes) == 0 || len(c.HTTP.Routes) != 2 {
+		t.Error("example must have queue and HTTP routes")
 	}
 }

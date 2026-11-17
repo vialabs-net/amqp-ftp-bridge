@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -152,9 +153,39 @@ func TestQuotaFailureDoesNotDeleteDestination(t *testing.T) {
 		}
 	}()
 	c := &Client{Address: control.Addr().String(), User: "u", Password: "p", Timeout: time.Second}
+	var mu sync.Mutex
+	open, peak := 0, 0
+	c.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil || address != c.Address {
+			return conn, err
+		}
+		mu.Lock()
+		open++
+		peak = max(peak, open)
+		mu.Unlock()
+		return &trackedConn{Conn: conn, closed: func() { mu.Lock(); open--; mu.Unlock() }}, nil
+	}
 	code, err := c.Upload(context.Background(), "", "existing.txt", strings.NewReader("replacement"))
 	<-done
+	mu.Lock()
+	if peak != 1 || open != 0 {
+		t.Errorf("cleanup connections: peak %d, open %d", peak, open)
+	}
+	mu.Unlock()
 	if err == nil || code != 552 || strings.Contains(strings.Join(commands, ","), "DELE existing.txt") {
 		t.Errorf("quota failure must preserve destination: %d, %v, commands %v", code, err, commands)
 	}
+}
+
+type trackedConn struct {
+	net.Conn
+	once   sync.Once
+	closed func()
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.closed)
+	return err
 }

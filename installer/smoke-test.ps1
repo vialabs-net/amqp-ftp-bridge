@@ -21,7 +21,9 @@ $name = 'amqp-ftp-bridge'
 $exe = Join-Path $env:ProgramFiles "$name\$name.exe"
 $data = Join-Path $env:ProgramData $name
 $ruleName = "$name metrics"
+$httpRuleName = "$name http"
 $allowFrom = '192.0.2.10'
+$httpAllowFrom = '192.0.2.20'
 $config = Resolve-Path (Join-Path $PSScriptRoot 'smoke-config.yaml')
 $step = 0
 
@@ -46,7 +48,34 @@ function Get-Products {
         Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq $name })
 }
 
-function Get-Rule { @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $ruleName) }
+function Get-Rule([string]$display = $ruleName) { @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $display) }
+
+function Test-Listening([int]$port) {
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        try { $client.Connect('127.0.0.1', $port); return $true } catch { Start-Sleep -Seconds 2 } finally { $client.Dispose() }
+    }
+    return $false
+}
+
+# Starts a local FTP server (pyftpdlib) with the smoke credentials. Returns
+# the process and its root directory, or $null when the runner cannot run it.
+function Start-LocalFtp {
+    try {
+        python -m pip install --quiet --disable-pip-version-check pyftpdlib 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $tmp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+        $root = Join-Path $tmp 'afb-ftp-root'
+        New-Item -ItemType Directory -Force $root | Out-Null
+        $p = Start-Process python -ArgumentList @('-m', 'pyftpdlib', '-i', '127.0.0.1', '-p', '2121', '-w', '-u', 'smoke', '-P', 'smoke-password', '-d', "`"$root`"") -PassThru -WindowStyle Hidden
+        if (-not (Test-Listening 2121)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; return $null }
+        return @{ Process = $p; Root = $root }
+    } catch {
+        Write-Host "local FTP server unavailable: $_"
+        return $null
+    }
+}
 
 function Assert-PrivateAcl([string]$path) {
     $svcSid = ([Security.Principal.NTAccount]"NT SERVICE\$name").Translate([Security.Principal.SecurityIdentifier]).Value
@@ -96,6 +125,7 @@ foreach ($dir in @($data, "$data\logs", "$data\credentials", "$data\tmp")) {
     Assert-PrivateAcl $dir
 }
 Check (@(Get-Rule).Count -eq 0) 'no firewall rule without METRICS_ALLOW_FROM'
+Check (@(Get-Rule $httpRuleName).Count -eq 0) 'no HTTP firewall rule without HTTP_ALLOW_FROM'
 Check (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$name") 'event log source registered'
 
 # 2. Credentials, as an administrator would store them.
@@ -103,6 +133,8 @@ Check (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$
 Check ($LASTEXITCODE -eq 0) 'creds set rabbitmq'
 "smoke`nsmoke-password" | & $exe creds set ftp
 Check ($LASTEXITCODE -eq 0) 'creds set ftp'
+"smoke`nsmoke-password" | & $exe creds set http-client
+Check ($LASTEXITCODE -eq 0) 'creds set http-client'
 Assert-PrivateAcl "$data\credentials\rabbitmq.bin"
 
 # A failed upgrade must roll back the removal of the working product.
@@ -125,8 +157,8 @@ foreach ($file in Get-ChildItem "$data\credentials" -Filter '*.bin') {
     Set-Acl $file.FullName $acl
 }
 
-# 3. Major upgrade with CONFIG_FILE and METRICS_ALLOW_FROM: service starts.
-Invoke-Msi @('/i', "`"$NewMsi`"", "CONFIG_FILE=`"$config`"", "METRICS_ALLOW_FROM=$allowFrom")
+# 3. Major upgrade with CONFIG_FILE, METRICS_ALLOW_FROM and HTTP_ALLOW_FROM: service starts.
+Invoke-Msi @('/i', "`"$NewMsi`"", "CONFIG_FILE=`"$config`"", "METRICS_ALLOW_FROM=$allowFrom", "HTTP_ALLOW_FROM=$httpAllowFrom")
 $products = @(Get-Products)
 Check ($products.Count -eq 1) "one installed product after the upgrade (got $($products.Count))"
 Check ($products[0].DisplayVersion -eq $NewVersion) "upgraded to $NewVersion (got $($products[0].DisplayVersion))"
@@ -148,12 +180,43 @@ $port = ($rule[0] | Get-NetFirewallPortFilter)
 Check (($addr -join ',') -eq $allowFrom) "firewall rule remote address (got $($addr -join ','))"
 Check ($port.LocalPort -eq '9464' -and $port.Protocol -eq 'TCP') "firewall rule port (got $($port.Protocol) $($port.LocalPort))"
 Check ($rule[0].Direction -eq 'Inbound' -and $rule[0].Action -eq 'Allow') 'firewall rule allows inbound'
+$httpRule = @(Get-Rule $httpRuleName)
+Check ($httpRule.Count -eq 1) 'HTTP firewall rule created'
+$httpAddr = ($httpRule[0] | Get-NetFirewallAddressFilter).RemoteAddress
+$httpPort = ($httpRule[0] | Get-NetFirewallPortFilter)
+Check (($httpAddr -join ',') -eq $httpAllowFrom) "HTTP firewall rule remote address (got $($httpAddr -join ','))"
+Check ($httpPort.LocalPort -eq '8080' -and $httpPort.Protocol -eq 'TCP') "HTTP firewall rule port (got $($httpPort.Protocol) $($httpPort.LocalPort))"
+
+# HTTP routes: the service listens; with a local FTP server, one upload and one download.
+Check (Test-Listening 8080) 'service listens on the HTTP port'
+$ftpServer = Start-LocalFtp
+if ($ftpServer) {
+    try {
+        $auth = @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('smoke:smoke-password')) }
+        $headers = $auth + @{ 'X-Folder' = 'smoke/in'; 'X-File-Name' = 'hello.txt' }
+        $up = Invoke-WebRequest -UseBasicParsing -Method Post -Uri 'http://127.0.0.1:8080/api/upload/' -Headers $headers -Body 'hello from the smoke test' -ContentType 'application/octet-stream'
+        Check ($up.StatusCode -eq 200) 'HTTP upload answers 200'
+        $stored = Join-Path $ftpServer.Root 'smoke\in\hello.txt'
+        Check ((Get-Content $stored -Raw) -eq 'hello from the smoke test') 'HTTP upload stored the file on the FTP server'
+        $down = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8080/api/file/L:smoke/in/hello.txt' -Headers $auth
+        $content = $down.Content
+        if ($content -is [byte[]]) { $content = [Text.Encoding]::UTF8.GetString($content) }
+        Check ($down.StatusCode -eq 200 -and $content -eq 'hello from the smoke test') "HTTP download returns the file (got $($down.StatusCode))"
+        $missing = try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8080/api/file/L:smoke/in/missing.txt' -Headers $auth | Out-Null; 200 } catch { [int]$_.Exception.Response.StatusCode }
+        Check ($missing -eq 404) "HTTP download of a missing file answers 404 (got $missing)"
+    } finally {
+        Stop-Process -Id $ftpServer.Process.Id -Force -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Host 'skip: no local FTP server on this runner, only the HTTP port was checked'
+}
 
 # 4. Uninstall: service, program and rule removed; data kept.
 Invoke-Msi @('/x', "`"$NewMsi`"")
 Check (-not (Get-Service $name -ErrorAction SilentlyContinue)) 'service removed'
 Check (-not (Test-Path $exe)) 'program removed'
 Check (@(Get-Rule).Count -eq 0) 'firewall rule removed'
+Check (@(Get-Rule $httpRuleName).Count -eq 0) 'HTTP firewall rule removed'
 Check (@(Get-Products).Count -eq 0) 'product removed'
 Check (-not (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$name")) 'event log source removed'
 Check (Test-Path "$data\config.yaml") 'configuration kept'
