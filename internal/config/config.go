@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ type Config struct {
 	AMQP       AMQP          `yaml:"amqp"`
 	DeadLetter DeadLetter    `yaml:"dead_letter"`
 	Metrics    Metrics       `yaml:"metrics"`
+	HTTP       HTTP          `yaml:"http"`
 	Sources    []Source      `yaml:"sources"`
 	FTP        []FTP         `yaml:"ftp"`
 	Routes     []Route       `yaml:"routes"`
@@ -201,6 +203,7 @@ func (c *Config) applyDefaults() {
 			c.FTP[i].Timeout = time.Minute
 		}
 	}
+	c.HTTP.applyDefaults()
 	for i := range c.Routes {
 		r := &c.Routes[i]
 		if r.Match != nil && r.Match.Otherwise == "" {
@@ -220,14 +223,18 @@ func (c *Config) Validate() error {
 	var errs []error
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
+	// AMQP is needed only by queue routes: an HTTP-only service omits it.
+	needAMQP := len(c.Routes) > 0
 	if c.AMQP.URL == "" {
-		add("amqp.url is required")
+		if needAMQP {
+			add("amqp.url is required")
+		}
 	} else if u, err := url.Parse(c.AMQP.URL); err != nil || (u.Scheme != "amqp" && u.Scheme != "amqps") {
 		add("amqp.url must be an amqp:// or amqps:// URL")
 	} else if u.User != nil {
 		add("amqp.url must not contain credentials: use amqp.credential")
 	}
-	if c.AMQP.Credential == "" {
+	if c.AMQP.Credential == "" && needAMQP {
 		add("amqp.credential is required")
 	}
 	if c.Audit.RetentionDays < 0 {
@@ -274,13 +281,14 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if len(c.Routes) == 0 {
-		add("at least one route is required")
+	if len(c.Routes) == 0 && len(c.HTTP.Routes) == 0 {
+		add("at least one route (routes or http.routes) is required")
 	}
 	queues := map[string]bool{}
 	for i, r := range c.Routes {
 		errs = append(errs, r.validate(i, queues, sources, targets)...)
 	}
+	errs = append(errs, c.HTTP.validate(targets)...)
 	return errors.Join(errs...)
 }
 
@@ -334,14 +342,35 @@ func (c *Config) Credentials() []string {
 			out = append(out, n)
 		}
 	}
-	add(c.AMQP.Credential)
+	if len(c.Routes) > 0 {
+		add(c.AMQP.Credential)
+	}
 	for _, s := range c.Sources {
 		add(s.Credential)
 	}
 	for _, f := range c.FTP {
 		add(f.Credential)
 	}
+	if c.HTTP.Enabled() {
+		for _, n := range c.HTTP.Credentials {
+			add(n)
+		}
+		for _, r := range c.HTTP.Routes {
+			for _, k := range sortedKeys(r.FTPCredentials) {
+				add(r.FTPCredentials[k])
+			}
+		}
+	}
 	return out
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Source returns the source with the given name.
