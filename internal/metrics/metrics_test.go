@@ -100,3 +100,41 @@ func TestServe(t *testing.T) {
 		t.Error("want listen error")
 	}
 }
+
+func TestHTTPMetrics(t *testing.T) {
+	p := New("1.0.0", "abc")
+	if ok, _ := p.Ready(); ok {
+		t.Error("ready without amqp")
+	}
+	p.SetAMQPRequired(false)
+	if ok, reason := p.Ready(); !ok {
+		t.Errorf("http only: %s", reason)
+	}
+	p.HTTPRequest("upload", 200, 120*time.Millisecond)
+	p.HTTPInFlight("upload", 1)
+	p.FTPSessions(1)
+	p.FTPSessions(1)
+	p.FTPSessions(-1)
+	p.FTPSessionWait(time.Second)
+	p.FTPSessionRejected()
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{
+		`bridge_http_requests_total{code="200",route="upload"} 1`,
+		`bridge_http_duration_seconds_count{route="upload"} 1`,
+		`bridge_http_inflight{route="upload"} 1`,
+		"bridge_ftp_sessions_in_use 1",
+		"bridge_ftp_session_wait_seconds_count 1",
+		"bridge_ftp_session_rejected_total 1",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("metrics lack %s", want)
+		}
+	}
+}
