@@ -830,7 +830,7 @@ func TestIntegrationCheck(t *testing.T) {
 	cfg, _ := writeTestConfig(t, rabbitAddr, ftpAddr, src.URL, "", routeSpec{queue: q})
 	code, out, errs := run([]string{"check", "--config", cfg}, "")
 	// The "wrong" FTP target fails to log in.
-	if code != 1 || strings.Count(out, "FAIL") != 1 || !strings.Contains(out, "530") || strings.Count(out, "OK") != 4 {
+	if code != 1 || strings.Count(out, "FAIL") != 1 || !strings.Contains(out, "530") || strings.Count(out, "OK") != 8 {
 		t.Errorf("check: %d\n%s%s", code, out, errs)
 	}
 	if !strings.Contains(out, "0 message(s), 0 consumer(s)") {

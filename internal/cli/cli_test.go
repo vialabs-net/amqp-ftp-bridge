@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -335,5 +337,137 @@ func TestCheckFails(t *testing.T) {
 	}
 	if code, _, _ := run([]string{"check", "--x"}, ""); code != 2 {
 		t.Error("bad flag")
+	}
+}
+
+const httpOnlyConfig = `
+data_dir: %DIR%
+shutdown_timeout: 2s
+ftp:
+  - name: main
+    address: 127.0.0.1:1
+    credential: ftp
+http:
+  listen: %LISTEN%
+  credentials: [http-client]
+  trusted_proxies: [192.0.2.10]
+  routes:
+    - name: upload
+      action: upload
+      path: /api/upload/
+      ftp: main
+      folder: header:X-Folder
+      file_name: header:X-File-Name
+    - name: download
+      action: download
+      path: "/api/file/{disk}:{dir...}/{name}"
+      ftp: main
+      folder: path:dir
+      file_name: path:name
+      ftp_credential_by: path:disk
+      ftp_credentials: { L: ftp-disk-l }
+`
+
+func writeHTTPConfig(t *testing.T, listen string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	body := strings.NewReplacer("%DIR%", dir, "%LISTEN%", listen).Replace(httpOnlyConfig)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir, p
+}
+
+func httpCreds() memStore {
+	return memStore{"ftp": {User: "u", Password: "p"}, "http-client": {User: "c", Password: "s"}, "ftp-disk-l": {User: "l", Password: "p"}}
+}
+
+func TestRunHTTPOnly(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	dir, cfg := writeHTTPConfig(t, addr)
+	withStore(t, httpCreds())
+	el := &recLog{}
+	oldEL, oldCtx := openEvLog, notifyCtx
+	t.Cleanup(func() { openEvLog, notifyCtx = oldEL, oldCtx })
+	openEvLog = func() winsvc.EventLog { return el }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notifyCtx = func() (context.Context, context.CancelFunc) { return ctx, cancel }
+	done := make(chan int, 1)
+	go func() { code, _, _ := run([]string{"run", "--config", cfg}, ""); done <- code }()
+
+	var resp *http.Response
+	for i := 0; i < 100; i++ {
+		req, _ := http.NewRequest("POST", "http://"+addr+"/api/upload/", strings.NewReader("x"))
+		req.SetBasicAuth("c", "wrong")
+		if resp, err = http.DefaultClient.Do(req); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d", resp.StatusCode)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Errorf("run = %d", code)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "logs", "service-"+time.Now().Format("2006-01-02")+".log"))
+	for _, want := range []string{"http listening", "0 queue route(s) and 2 http route(s)", "stopped"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("service log lacks %q:\n%s", want, b)
+		}
+	}
+	if strings.Contains(string(b), "reconnecting") || strings.Contains(string(b), "amqp connected") {
+		t.Errorf("HTTP-only service mentions amqp:\n%s", b)
+	}
+	a, _ := os.ReadFile(filepath.Join(dir, "logs", audit.FileName(time.Now())))
+	if !strings.Contains(string(a), `"route":"upload"`) || !strings.Contains(string(a), `"http_status":401`) {
+		t.Errorf("audit:\n%s", a)
+	}
+}
+
+func TestRunHTTPListenError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, cfg := writeHTTPConfig(t, ln.Addr().String())
+	withStore(t, httpCreds())
+	if code, _, errs := run([]string{"run", "--config", cfg}, ""); code != 1 || !strings.Contains(errs, "http listener") {
+		t.Errorf("%d %q", code, errs)
+	}
+}
+
+func TestCheckHTTP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy := ln.Addr().String()
+	_, cfg := writeHTTPConfig(t, busy)
+	withStore(t, httpCreds())
+	code, out, _ := run([]string{"check", "--config", cfg, "--timeout", "2s"}, "")
+	// Port in use, and both FTP logins fail (nothing listens on port 1).
+	if code != 1 || strings.Count(out, "FAIL") != 3 || strings.Count(out, "OK   cred") != 3 ||
+		!strings.Contains(out, "(ftp-disk-l)") || !strings.Contains(out, "FAIL http") || strings.Contains(out, "amqp") {
+		t.Errorf("check: %d\n%s", code, out)
+	}
+	ln.Close()
+	withStore(t, memStore{"ftp": {User: "u", Password: "p"}})
+	code, out, _ = run([]string{"check", "--config", cfg, "--timeout", "2s"}, "")
+	if code != 1 || !strings.Contains(out, "FAIL cred    http-client") || !strings.Contains(out, "OK   http") || strings.Contains(out, "(ftp-disk-l)") {
+		t.Errorf("check: %d\n%s", code, out)
 	}
 }
