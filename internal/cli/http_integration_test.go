@@ -205,7 +205,7 @@ func TestIntegrationHTTPUploadDownload(t *testing.T) {
 	abs := ftpPwd(t, ftpAddr) + "/" + folder
 	resp, got := httpGet(t, base+"/api/file/L:"+abs+"/r.pdf", "dl-abs")
 	if resp.StatusCode != 200 || got != "second version" || resp.ContentLength != int64(len("second version")) ||
-		resp.Header.Get("Content-Type") != "application/octet-stream" || resp.Header.Get("X-Request-Id") != "dl-abs" {
+		resp.Header.Get("Content-Type") != "text/plain; charset=utf-8" || resp.Header.Get("X-Request-Id") != "dl-abs" {
 		t.Errorf("download = %d %q %v", resp.StatusCode, got, resp.Header)
 	}
 	if s := steps(logDir, "dl-abs"); s != "received,downloaded,responded" {

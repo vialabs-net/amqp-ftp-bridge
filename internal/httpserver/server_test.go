@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -397,12 +398,55 @@ func TestFTPErrors(t *testing.T) {
 	}
 }
 
+func TestDownloadContentTypeUsesFileContents(t *testing.T) {
+	var docx bytes.Buffer
+	archive := zip.NewWriter(&docx)
+	for _, part := range []string{"[Content_Types].xml", "_rels/.rels", "word/document.xml"} {
+		w, err := archive.Create(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, "<document/>"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	const word = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	for _, c := range []struct{ name, body, mime string }{
+		{"contract.doc", docx.String(), word},
+		{"contract.DOCX", docx.String(), word},
+		{"contract.bin", docx.String(), word},
+		{"unknown.doc", "\x00\x01\x02\xff", "application/octet-stream"},
+		{"fragment.html", "<!DOCTYPE html><html></html>", "text/html; charset=utf-8"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f.ftp.mu.Lock()
+			f.ftp.files["disk-l:/a/"+c.name] = c.body
+			f.ftp.mu.Unlock()
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				resp, body := f.do(t, method, "/api/file/L:/a/"+c.name, nil, nil)
+				wantBody := c.body
+				if method == http.MethodHead {
+					wantBody = ""
+				}
+				if resp.StatusCode != http.StatusOK || body != wantBody || resp.Header.Get("Content-Type") != c.mime ||
+					resp.Header.Get("Content-Disposition") != "attachment" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+					t.Fatalf("%s download = %d, %d bytes, %v", method, resp.StatusCode, len(body), resp.Header)
+				}
+			}
+		})
+	}
+}
+
 func TestDownload(t *testing.T) {
 	f := newFixture(t)
 	f.ftp.files["disk-l:/a/b/c.pdf"] = "%PDF-content"
 	f.ftp.files["disk-l:a/c.pdf"] = "relative"
 	resp, body := f.do(t, "GET", "/api/file/L:/a/b/c.pdf", nil, map[string]string{"X-Request-Id": "dl-1"})
-	if resp.StatusCode != 200 || body != "%PDF-content" || resp.Header.Get("Content-Type") != "application/octet-stream" || resp.ContentLength != 12 {
+	if resp.StatusCode != 200 || body != "%PDF-content" || resp.Header.Get("Content-Type") != "application/pdf" || resp.ContentLength != 12 {
 		t.Fatalf("download = %d %q %v", resp.StatusCode, body, resp.Header)
 	}
 	if s := f.audit.steps("dl-1"); s != "received,downloaded,responded" {
@@ -449,8 +493,9 @@ func TestDownload(t *testing.T) {
 
 func TestDownloadInterrupted(t *testing.T) {
 	f := newFixture(t)
-	f.ftp.files["disk-l:/a/big.bin"] = strings.Repeat("x", 100)
-	f.ftp.truncate = 10
+	const cutoff = downloadProbeSize + 1024
+	f.ftp.files["disk-l:/a/big.bin"] = strings.Repeat("x", cutoff*2)
+	f.ftp.truncate = cutoff
 	req, _ := http.NewRequest("GET", f.ts.URL+"/api/file/L:/a/big.bin", nil)
 	req.SetBasicAuth("client", "secret")
 	req.Header.Set("X-Request-Id", "cut-1")
@@ -469,7 +514,20 @@ func TestDownloadInterrupted(t *testing.T) {
 	if s := f.audit.steps("cut-1"); s != "received,failed,responded" {
 		t.Errorf("steps = %s", s)
 	}
-	if r := f.audit.find("cut-1", audit.StepFailed); r.FailedStep != StepTransfer || *r.Bytes != 10 {
+	if r := f.audit.find("cut-1", audit.StepFailed); r.FailedStep != StepTransfer || *r.Bytes != cutoff {
+		t.Errorf("failed = %+v", r)
+	}
+}
+
+func TestDownloadInterruptedBeforeHeaders(t *testing.T) {
+	f := newFixture(t)
+	f.ftp.files["disk-l:/a/file.bin"] = "file contents"
+	f.ftp.truncate = 5
+	resp, body := f.do(t, "GET", "/api/file/L:/a/file.bin", nil, nil)
+	if resp.StatusCode != http.StatusBadGateway || strings.TrimSpace(body) != "FTP transfer failed" {
+		t.Fatalf("early transfer failure = %d %q", resp.StatusCode, body)
+	}
+	if r := f.audit.find(resp.Header.Get("X-Request-Id"), audit.StepFailed); r.FailedStep != StepTransfer {
 		t.Errorf("failed = %+v", r)
 	}
 }

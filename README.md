@@ -131,7 +131,7 @@ At most twice `max_ftp_sessions` uploads can receive or retain temporary bodies 
 
 **Download**
 
-The service takes an FTP session and streams `RETR` to the response, with `Content-Type: application/octet-stream`. It does not advertise the earlier FTP `SIZE`: a concurrent upload can replace that file before `RETR`. HTTP frames the bytes actually transferred. The session is freed when the stream ends, the client disconnects or `write_timeout` expires. If the FTP transfer breaks after the response started, the connection is aborted, so the client sees an error and not a short file.
+The service takes an FTP session and streams `RETR` to the response. It detects the media type from up to the first 64 KiB of the file and sends the response as an attachment. Unrecognized content uses `application/octet-stream`. HTTP frames the bytes actually transferred because a concurrent upload can replace the file between FTP `SIZE` and `RETR`. The session is freed when the stream ends, the client disconnects or `write_timeout` expires. If the FTP transfer breaks after the response starts, the connection is aborted so the client can detect an incomplete transfer.
 
 **Status codes**
 

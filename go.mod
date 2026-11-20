@@ -3,6 +3,7 @@ module github.com/vialabs-net/amqp-ftp-bridge
 go 1.27.4
 
 require (
+	github.com/gabriel-vasile/mimetype v1.4.16
 	github.com/jlaffaye/ftp v0.2.4
 	github.com/moby/moby/api v1.56.1
 	github.com/prometheus/client_golang v1.25.0
