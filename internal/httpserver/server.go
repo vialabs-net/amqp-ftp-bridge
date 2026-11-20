@@ -3,6 +3,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -21,12 +22,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/audit"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/config"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/creds"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/ftpup"
 	"github.com/vialabs-net/amqp-ftp-bridge/internal/pathpattern"
 )
+
+const downloadProbeSize = 64 << 10
+
+func init() {
+	mimetype.SetLimit(downloadProbeSize)
+}
 
 // Steps reported in failed audit records.
 const (
@@ -532,8 +540,16 @@ func (s *Server) download(x *exchange) {
 		s.ftpFailure(x, StepDownload, err)
 		return
 	}
+	prefix, err := io.ReadAll(io.LimitReader(t, downloadProbeSize))
+	if err != nil {
+		code, _ := t.Close()
+		s.obs().FTPResult(x.r.Context().Err() != nil)
+		s.fail(x, http.StatusBadGateway, StepTransfer, err, code, "FTP transfer failed")
+		return
+	}
 	h := x.w.Header()
-	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Type", mimetype.Detect(prefix).String())
+	h.Set("Content-Disposition", "attachment")
 	h.Set("X-Content-Type-Options", "nosniff")
 	// SIZE and RETR can observe different versions. Let HTTP frame the bytes
 	// actually received rather than advertise a potentially stale length.
@@ -542,7 +558,7 @@ func (s *Server) download(x *exchange) {
 	var n int64
 	var copyErr error
 	if x.r.Method != http.MethodHead {
-		n, copyErr = io.Copy(x.w, t)
+		n, copyErr = io.Copy(x.w, io.MultiReader(bytes.NewReader(prefix), t))
 	}
 	code, closeErr := t.Close()
 	if copyErr == nil {
